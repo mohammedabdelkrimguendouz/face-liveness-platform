@@ -1,0 +1,48 @@
+# Root-level ignore for the face-liveness platform.
+# The enclosing `Thirduni` repo also has its own .gitattributes (LFS for *.mp4).
+
+# --- Node ---
+node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+.npm/
+.eslintcache
+
+# Packed tarballs (never commit built packages)
+*.tgz
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# --- Model weights (137 MB — intentionally NOT in git) ---
+# See docs/RENDER.md for how to supply these at deploy time.
+saved_models/
+*.pt
+*.pth
+*.ckpt
+
+# --- Secrets / local config ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials.json
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

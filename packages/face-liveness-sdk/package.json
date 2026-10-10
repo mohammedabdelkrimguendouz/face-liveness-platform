@@ -1,0 +1,70 @@
+{
+  "name": "@thirduni/face-liveness-sdk",
+  "version": "0.1.0",
+  "description": "Browser SDK for passive face liveness verification. Captures a facial frame sequence and streams it to a liveness backend over WebSocket.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js",
+      "require": "./dist/react/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "peerDependencies": {
+    "react": ">=17"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "jsdom": "^24.0.0",
+    "react": "^18.3.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "keywords": [
+    "liveness",
+    "face",
+    "anti-spoofing",
+    "biometrics",
+    "verification",
+    "react"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mohammedabdelkrimguendouz/face-liveness-platform.git"
+  },
+  "homepage": "https://github.com/mohammedabdelkrimguendouz/face-liveness-platform#readme",
+  "bugs": {
+    "url": "https://github.com/mohammedabdelkrimguendouz/face-liveness-platform/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

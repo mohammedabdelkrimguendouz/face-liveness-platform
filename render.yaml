@@ -1,0 +1,42 @@
+# Render blueprint for the Face Liveness API.
+#
+# IMPORTANT — instance size:
+# Measured peak RSS on this model is ~960 MB (CPU, batch 16) and remains well
+# above 512 MB even with the reduced default batch size. Render's free/starter
+# 512 MB instances WILL be OOM-killed. Use a Standard (2 GB) instance or larger.
+#
+# Root directory: point Render at `face-liveness-platform/` (this file's folder)
+# or copy this file to your repo root and set Root Directory accordingly.
+services:
+  - type: web
+    name: face-liveness-api
+    runtime: python
+    plan: standard # >= 2 GB RAM required (see note above)
+    rootDir: services/face-liveness-api
+    healthCheckPath: /health
+
+    # Downloads/verifies weights before startup; fails loudly if absent.
+    buildCommand: >
+      pip install --no-cache-dir -r requirements.txt
+      && python scripts/fetch_models.py
+
+    startCommand: >
+      uvicorn app.main:app --host 0.0.0.0 --port $PORT
+      --workers 1 --log-level info
+
+    envVars:
+      # Single worker: sessions are in-memory, so multiple workers would break
+      # session affinity. Scale vertically instead.
+      - key: LIVENESS_DEVICE
+        value: cpu
+      - key: LIVENESS_BATCH_SIZE
+        value: "8"
+      # Set to a zip/tar URL containing EfficientNet_B2.pt and
+      # ABC_BiLSTM_Undercomplete_AE.pt (private bucket or release asset).
+      # - key: LIVENESS_MODELS_URL
+      #   value: https://example-bucket.example.com/face-liveness-models.zip
+      #   sync: false
+      - key: LIVENESS_ALLOWED_ORIGINS
+        value: https://your-demo-app.vercel.app
+      - key: LOG_LEVEL
+        value: info

@@ -1,0 +1,214 @@
+# Face Liveness Platform
+
+Production platform for **passive face liveness detection** (anti-spoofing),
+built on the existing research pipeline. The client captures a short RGB camera
+sequence and streams it to a backend that runs the trained model and returns
+the authoritative **live / spoof** verdict.
+
+> **The model runs server-side, always.** The browser never computes the
+> decision — it only captures, encodes, and streams frames.
+
+---
+
+## What's in here
+
+```
+face-liveness-platform/
+├── services/face-liveness-api/     FastAPI + WebSocket + PyTorch inference
+├── packages/face-liveness-sdk/     @thirduni/face-liveness-sdk (TypeScript)
+├── apps/demo-web/                  Vite + React demo
+├── docs/                           Protocol, deployment, troubleshooting
+├── render.yaml                     Render blueprint (≥2 GB instance)
+└── README.md                       (this file)
+```
+
+| Component | Stack | Entry point |
+|-----------|-------|-------------|
+| **API** | FastAPI, WebSocket, PyTorch | `services/face-liveness-api/app/main.py` |
+| **SDK** | TypeScript, ESM + CJS, React bindings | `packages/face-liveness-sdk/src/` |
+| **Demo** | Vite, React 18 | `apps/demo-web/src/App.tsx` |
+
+---
+
+## How it works
+
+1. **Session** — client `POST /sessions` → gets `session_id`, `ws_token`,
+   `num_frames` (150).
+2. **Stream** — client opens `WS /ws/sessions/{id}?token=…` and sends 150
+   frames: `4-byte big-endian sequence index` + `JPEG payload`.
+3. **Assemble** — server stores frames by index (order-independent), rejects
+   duplicates/oversized/out-of-range, and auto-finalizes when all arrive.
+4. **Infer** — EfficientNet-B2 extracts 1408-d features per frame → a BiLSTM
+   undercomplete autoencoder reconstructs the sequence →
+   `anomaly_score = 1 − exp(−MSE)`.
+5. **Decide** — `score > 0.5` ⇒ `spoof`, else `live`. Returned as `result`.
+
+Frames are then released; the score is an **anomaly score, not a
+probability**.
+
+Full wire spec: [`docs/protocol.md`](docs/protocol.md).
+
+---
+
+## The ML pipeline (unchanged)
+
+This platform **reuses the existing trained model with no retraining and no
+preprocessing changes**:
+
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| Input size | 288 × 288 | `config.IMAGE_SIZE` |
+| Frames | 150 (uniform sampling) | `config.NUM_FRAMES` |
+| Features | 1408 (EfficientNet-B2) | `config.FEATURE_SIZE` |
+| Threshold | 0.5 | `config.THRESHOLD` |
+| Score | `1 − exp(−MSE)` | `run_test.py` |
+| Normalization | ImageNet mean/std, `/255`, NCHW, BGR→RGB | `feature_extractor.py` |
+
+`app/ml/feature_extractor.py`, `lstm_models.py`, and `model_loader.py` are
+copied **verbatim** from the research project. `bi_lstm_undercomplete.py`
+reconstructs the one model class that matches the shipped checkpoint
+(`ABC_BiLSTM_Undercomplete_AE.pt`) — verified with a `strict=True` state-dict
+load (0 missing / 0 unexpected keys).
+
+Verified decisions on the bundled Oulu samples:
+
+| Video | Score | Prediction |
+|-------|-------|------------|
+| `1_1_14_1_real_oulu.avi` | 0.038 | **live** ✓ |
+| `1_1_14_3_printer2_oulu.avi` | 0.996 | **spoof** ✓ |
+
+*(Full analysis and honest limitations: [`docs/IMPLEMENTATION_REPORT.md`](docs/IMPLEMENTATION_REPORT.md))*
+
+---
+
+## Quick start (local)
+
+### 1. API
+
+```bash
+cd services/face-liveness-api
+python -m venv .venv
+.venv/Scripts/pip install -r requirements.txt        # or pip3 on macOS/Linux
+.venv/Scripts/python scripts/fetch_models.py          # verifies weights
+.venv/Scripts/python -m uvicorn app.main:app --port 8000
+```
+
+By default the API looks for weights in
+`Face Anti Spoofing Project/My Code For Testing Local Vedio/test_models/saved_models/`.
+Override with `LIVENESS_MODELS_DIR`.
+
+```bash
+curl localhost:8000/ready   # {"ready":true,"device":"cpu","num_frames":150,...}
+```
+
+### 2. Demo
+
+```bash
+cd apps/demo-web
+npm install
+cp .env.example .env        # points at http://localhost:8000
+npm run dev                 # http://localhost:5173
+```
+
+Open in a browser, allow camera access, click **Start verification**.
+
+> Camera access needs a secure context: `https://` or `http://localhost`.
+
+### 3. SDK (standalone)
+
+```bash
+cd packages/face-liveness-sdk
+npm install && npm run build
+```
+
+```ts
+import { LivenessClient } from "@thirduni/face-liveness-sdk";
+// or: import { useLiveness } from "@thirduni/face-liveness-sdk/react";
+
+const result = await new LivenessClient({ apiUrl: "https://api.example.com" }).start();
+console.log(result.prediction); // "live" | "spoof"
+```
+
+---
+
+## Tests
+
+```bash
+# API — 21 tests (protocol mocked + 2 real-model integration tests)
+cd services/face-liveness-api && .venv/Scripts/python -m pytest -v
+
+# SDK — 7 tests (mocked camera/WebSocket)
+cd packages/face-liveness-sdk && npm test
+
+# Demo — typecheck + production build
+cd apps/demo-web && npm run typecheck && npm run build
+```
+
+---
+
+## Deployment
+
+Deployment configs and exact commands are prepared; **you run the deploys**
+(no credentials are stored here).
+
+| Target | Config | Guide |
+|--------|--------|-------|
+| API | `render.yaml` | [`docs/RENDER.md`](docs/RENDER.md) |
+| Demo | `apps/demo-web/vercel.json` | [`docs/VERCEL.md`](docs/VERCEL.md) |
+| SDK | — | [`docs/NPM.md`](docs/NPM.md) |
+
+**Important:** Render needs a **≥2 GB instance** (measured peak RSS ≈ 960 MB;
+512 MB free tier will be OOM-killed). Model weights (137 MB) are **not in
+git** — supply them via `LIVENESS_MODELS_URL` or `LIVENESS_MODELS_DIR`.
+
+---
+
+## Configuration reference
+
+All via environment variables (see `app/config.py`):
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `LIVENESS_MODELS_DIR` | repo `saved_models/` | Checkpoint directory. |
+| `LIVENESS_DEVICE` | `cpu` | |
+| `LIVENESS_BATCH_SIZE` | `8` | Lower ⇒ less RAM, slower. |
+| `LIVENESS_NUM_FRAMES` | `150` | Must match the checkpoint. |
+| `LIVENESS_SESSION_TTL` | `300` | Idle session expiry (s). |
+| `LIVENESS_MAX_SESSIONS` | `50` | Concurrent session cap. |
+| `LIVENESS_MAX_CONCURRENT_INFERENCES` | `1` | Inference semaphore. |
+| `LIVENESS_MAX_FRAME_BYTES` | `2097152` | Per-frame size cap. |
+| `LIVENESS_ALLOWED_ORIGINS` | `http://localhost:5173` | CORS, comma-separated. |
+| `VITE_LIVENESS_API_URL` | `http://localhost:8000` | Build-time, demo only. |
+
+---
+
+## Honest limitations
+
+1. **Consumer-webcam domain gap.** The checkpoint was trained on Oulu
+   cross-device data; a face from an ordinary laptop webcam can score as
+   *spoof*. This also happened with the original research code (a real webcam
+   video scored 0.9999 spoof) — it is a property of the model, not this
+   platform. Retraining on your target camera would fix it; that was
+   explicitly out of scope.
+2. **`reverse_target` is inferred**, not recoverable from the checkpoint. Both
+   values give near-identical scores (0.993 on a reference video either way),
+   so the choice has negligible practical impact — but it is an inference, not
+   a recovered fact.
+3. **CPU-only inference** — ~8–10 s per verification on a typical vCPU
+   (excluding upload).
+4. **Camera capture is untested in CI** — it needs a physical webcam and user
+   permission. The WS + model path *is* covered by the real-model tests.
+5. **Not deployed / not published.** Render, Vercel, and npm steps are
+   prepared and documented but intentionally left to you.
+
+See [`docs/IMPLEMENTATION_REPORT.md`](docs/IMPLEMENTATION_REPORT.md) for
+measured numbers and the full verification record.
+
+---
+
+## Further reading
+
+- [`docs/protocol.md`](docs/protocol.md) — WebSocket wire protocol
+- [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — failure modes & fixes
+- [`docs/RENDER.md`](docs/RENDER.md) · [`docs/VERCEL.md`](docs/VERCEL.md) · [`docs/NPM.md`](docs/NPM.md) — deployment
+- [`docs/IMPLEMENTATION_REPORT.md`](docs/IMPLEMENTATION_REPORT.md) — what was built, measured, verified
