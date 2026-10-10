@@ -6,23 +6,18 @@ import os
 from dataclasses import dataclass, field
 from typing import List
 
+from .paths import resolve_models_dir
+
 
 def _csv(value: str) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _default_models_dir() -> str:
-    # Default to the repo's saved_models, relative to this file, unless overridden.
-    here = os.path.dirname(os.path.abspath(__file__))
-    platform_root = os.path.abspath(os.path.join(here, "..", "..", ".."))
-    project_root = os.path.abspath(os.path.join(platform_root, ".."))
-    return os.path.join(project_root, "My Code For Testing Local Vedio", "test_models", "saved_models")
-
-
 @dataclass
 class Settings:
-    # Model
-    models_dir: str = field(default_factory=lambda: os.environ.get("LIVENESS_MODELS_DIR", _default_models_dir()))
+    # Model. Defaults to the in-repo <service root>/models directory; see
+    # app/paths.py for the single resolution rule shared with the build step.
+    models_dir: str = field(default_factory=lambda: str(resolve_models_dir()))
     device: str = os.environ.get("LIVENESS_DEVICE", "cpu")
     batch_size: int = int(os.environ.get("LIVENESS_BATCH_SIZE", "8"))
 

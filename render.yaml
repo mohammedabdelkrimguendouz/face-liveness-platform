@@ -5,17 +5,31 @@
 # above 512 MB even with the reduced default batch size. Render's free/starter
 # 512 MB instances WILL be OOM-killed. Use a Standard (2 GB) instance or larger.
 #
-# Root directory: point Render at `face-liveness-platform/` (this file's folder)
-# or copy this file to your repo root and set Root Directory accordingly.
+# This file is at the repository root, so Render's Blueprint flow detects it
+# automatically. `rootDir` below sets the working directory for both the build
+# and the start command to services/face-liveness-api/.
+#
+# Model weights: the two checkpoints are committed to this repo at
+# services/face-liveness-api/models/ (EfficientNet_B2.pt and
+# ABC_BiLSTM_Undercomplete_AE.pt). Nothing is downloaded at build time.
 services:
   - type: web
     name: face-liveness-api
     runtime: python
     plan: standard # >= 2 GB RAM required (see note above)
     rootDir: services/face-liveness-api
-    healthCheckPath: /health
 
-    # Downloads/verifies weights before startup; fails loudly if absent.
+    # /health is a plain process-liveness probe that returns 200 even if the
+    # model failed to load. /ready returns 503 until both checkpoints are
+    # loaded, so using it here means a deploy with a broken model is reported
+    # as failed instead of silently going green.
+    # Trade-off: Render must tolerate a 503 for ~10 s while the model loads,
+    # which it does — health checks are retried for up to 15 minutes before a
+    # new deploy is cancelled. See docs/RENDER.md.
+    healthCheckPath: /ready
+
+    # Verifies the committed checkpoints are present; fails loudly if absent.
+    # No download step — the weights ship with the repository.
     buildCommand: >
       pip install --no-cache-dir -r requirements.txt
       && python scripts/fetch_models.py
@@ -31,11 +45,17 @@ services:
         value: cpu
       - key: LIVENESS_BATCH_SIZE
         value: "8"
-      # Set to a zip/tar URL containing EfficientNet_B2.pt and
-      # ABC_BiLSTM_Undercomplete_AE.pt (private bucket or release asset).
-      # - key: LIVENESS_MODELS_URL
-      #   value: https://example-bucket.example.com/face-liveness-models.zip
-      #   sync: false
+      # Checkpoint directory. `models` is relative to SERVICE_ROOT
+      # (services/face-liveness-api/), which app/paths.py anchors to the
+      # package location rather than to the process cwd — so the build step
+      # and the running API resolve the identical absolute path.
+      # Leave as-is unless you relocate the weights.
+      - key: LIVENESS_MODELS_DIR
+        value: models
+      # Set to your deployed demo origin once the Vercel app exists
+      # (comma-separated for more than one). Until then the placeholder only
+      # blocks cross-origin browser calls; same-origin and server-side calls
+      # are unaffected.
       - key: LIVENESS_ALLOWED_ORIGINS
         value: https://your-demo-app.vercel.app
       - key: LOG_LEVEL

@@ -272,9 +272,12 @@ covered by tests that now pass.
    `@thirduni/face-liveness-sdk` is assumed to be available/owned.
    `docs/NPM.md` includes the `npm view` check and the fallback of renaming.
 
-7. **Weights are not in git (137 MB).**
-   `fetch_models.py` fails the build loudly if they're absent; supply via
-   `LIVENESS_MODELS_URL` or `LIVENESS_MODELS_DIR`. Documented in
+7. **Weights are in git (101.4 MB across the two checkpoints).**
+   Both are committed at `services/face-liveness-api/models/`, so
+   `fetch_models.py` only verifies them at build time — no download, no
+   external storage, no Git LFS. Each file is under GitHub's 100 MB limit
+   (`EfficientNet_B2.pt` 31,254,679 B; `ABC_BiLSTM_Undercomplete_AE.pt`
+   75,055,141 B). The build fails loudly if they're absent. Documented in
    `docs/RENDER.md`.
 
 8. **In-memory sessions, single worker.**

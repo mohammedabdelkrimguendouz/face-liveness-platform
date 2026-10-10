@@ -93,9 +93,10 @@ python -m venv .venv
 .venv/Scripts/python -m uvicorn app.main:app --port 8000
 ```
 
-By default the API looks for weights in
-`Face Anti Spoofing Project/My Code For Testing Local Vedio/test_models/saved_models/`.
-Override with `LIVENESS_MODELS_DIR`.
+By default the API looks for the weights committed to this repo at
+`services/face-liveness-api/models/` (resolved by `app/paths.py`).
+Override with `LIVENESS_MODELS_DIR` — a relative value is anchored to
+`services/face-liveness-api/`, not to the working directory.
 
 ```bash
 curl localhost:8000/ready   # {"ready":true,"device":"cpu","num_frames":150,...}
@@ -158,8 +159,10 @@ Deployment configs and exact commands are prepared; **you run the deploys**
 | SDK | — | [`docs/NPM.md`](docs/NPM.md) |
 
 **Important:** Render needs a **≥2 GB instance** (measured peak RSS ≈ 960 MB;
-512 MB free tier will be OOM-killed). Model weights (137 MB) are **not in
-git** — supply them via `LIVENESS_MODELS_URL` or `LIVENESS_MODELS_DIR`.
+512 MB free tier will be OOM-killed). Model weights (101.4 MB across the two
+checkpoints) **are in git** at `services/face-liveness-api/models/` — there is
+no download step and no external storage. Both files are under GitHub's
+100 MB per-file limit and Git LFS is not used.
 
 ---
 
@@ -169,7 +172,7 @@ All via environment variables (see `app/config.py`):
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `LIVENESS_MODELS_DIR` | repo `saved_models/` | Checkpoint directory. |
+| `LIVENESS_MODELS_DIR` | `models/` (i.e. `services/face-liveness-api/models/`) | Checkpoint directory. Relative values anchor to `services/face-liveness-api/`, never the cwd. |
 | `LIVENESS_DEVICE` | `cpu` | |
 | `LIVENESS_BATCH_SIZE` | `8` | Lower ⇒ less RAM, slower. |
 | `LIVENESS_NUM_FRAMES` | `150` | Must match the checkpoint. |

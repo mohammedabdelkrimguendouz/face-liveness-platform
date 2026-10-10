@@ -7,15 +7,17 @@ import sys
 
 import pytest
 
-# Make the `app` package importable and point at the real model weights.
+# Make the `app` package importable and point at the model weights.
 API_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if API_ROOT not in sys.path:
     sys.path.insert(0, API_ROOT)
 
-REPO_MODELS = os.path.abspath(os.path.join(
-    API_ROOT, "..", "..", "..",
-    "My Code For Testing Local Vedio", "test_models", "saved_models",
-))
+# The checkpoints are committed to this repository; resolve them through the
+# same function the application and the build step use (app/paths.py) so the
+# tests exercise the real deployment path rather than a private copy of it.
+from app.paths import REQUIRED_CHECKPOINTS, resolve_models_dir  # noqa: E402
+
+REPO_MODELS = str(resolve_models_dir())
 REPO_VIDEOS = os.path.abspath(os.path.join(
     API_ROOT, "..", "..", "..",
     "My Code For Testing Local Vedio", "test_models", "test_videos",
@@ -29,8 +31,9 @@ def pytest_configure(config):
 
 @pytest.fixture(scope="session")
 def models_dir() -> str:
-    if not os.path.isdir(REPO_MODELS):
-        pytest.skip("Model weights not available")
+    missing = [n for n in REQUIRED_CHECKPOINTS if not os.path.isfile(os.path.join(REPO_MODELS, n))]
+    if missing:
+        pytest.skip(f"Model weights not available in {REPO_MODELS}: {missing}")
     return REPO_MODELS
 
 

@@ -24,12 +24,18 @@ __pycache__/
 venv/
 env/
 
-# --- Model weights (137 MB — intentionally NOT in git) ---
-# See docs/RENDER.md for how to supply these at deploy time.
+# --- Model weights ---
+# The two checkpoints required at runtime ARE committed to this repo, at
+# services/face-liveness-api/models/, so the deploy needs no download step.
+# They are un-ignored explicitly below. Every other weight file — including
+# the research project's saved_models/ and the alternate .pth extractor —
+# stays out of git.
 saved_models/
 *.pt
 *.pth
 *.ckpt
+!services/face-liveness-api/models/EfficientNet_B2.pt
+!services/face-liveness-api/models/ABC_BiLSTM_Undercomplete_AE.pt
 
 # --- Secrets / local config ---
 .env

@@ -11,9 +11,9 @@ curl https://your-api/ready
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `Model checkpoint not found: …` | Weights absent | Set `LIVENESS_MODELS_DIR` or `LIVENESS_MODELS_URL`. See `docs/RENDER.md`. |
+| `Model checkpoint not found: …` | Weights absent from `services/face-liveness-api/models/` | Restore `EfficientNet_B2.pt` and `ABC_BiLSTM_Undercomplete_AE.pt` there (they are committed to the repo), or point `LIVENESS_MODELS_DIR` at them. See `docs/RENDER.md`. |
 | `size mismatch for …` | Wrong checkpoint / class mismatch | Use `ABC_BiLSTM_Undercomplete_AE.pt` with `bi_lstm_undercomplete.BiLSTMUndercompleteAE`. The loader uses `strict=True` by design. |
-| Build fails in `fetch_models.py` | Archive missing a file | The zip must contain **both** `EfficientNet_B2.pt` and `ABC_BiLSTM_Undercomplete_AE.pt`. |
+| Build fails in `fetch_models.py` | Checkpoint(s) missing on disk | The script verifies — it does not download. Both `EfficientNet_B2.pt` and `ABC_BiLSTM_Undercomplete_AE.pt` must exist in `services/face-liveness-api/models/`; the error prints the resolved path. |
 | Process starts, then OOM-killed | Instance < 2 GB | Measured peak ≈ 960 MB. Use Render Standard (2 GB)+. |
 
 `/health` only reports the process is alive — always check `/ready` for model
