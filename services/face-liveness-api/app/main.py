@@ -160,11 +160,10 @@ async def create_session() -> SessionCreateResponse:
     except SessionError as exc:
         raise HTTPException(status_code=429, detail={"error": exc.code, "message": exc.message})
 
-    scheme = "ws"
-    host = "localhost"
     return SessionCreateResponse(
         session_id=session.session_id,
-        ws_url=f"{scheme}://{host}/ws/sessions/{session.session_id}",
+        # Relative on purpose — see _ws_path().
+        ws_url=_ws_path(session.session_id),
         ws_token=session.ws_token,
         num_frames=session.num_frames,
         max_frame_bytes=session.max_frame_bytes,
@@ -193,7 +192,19 @@ async def session_status(session_id: str) -> SessionStatusResponse:
 SEQ_HEADER = struct.Struct(">I")  # 4-byte big-endian sequence index
 
 
-def _ws_url(session_id: str, request: Request) -> str:
+def _ws_path(session_id: str) -> str:
+    """WebSocket path for a session, relative to the API's own origin.
+
+    Deliberately **relative**: the client resolves it against the ``apiUrl``
+    it was configured with. That is what makes one server build work in every
+    environment — ``ws://localhost:8000/ws/sessions/...`` in local
+    development, ``wss://<your-api>.onrender.com/ws/sessions/...`` in
+    production — without reading ``X-Forwarded-*`` headers from a proxy.
+
+    Returning an absolute ``ws://localhost/...`` here instead hard-codes the
+    host and makes every deployed browser try to open its own machine's
+    port 80.
+    """
     return f"/ws/sessions/{session_id}"
 
 

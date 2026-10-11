@@ -34,7 +34,12 @@ def test_create_session_shape(fastapi_client):
         assert key in body, f"missing {key}"
     assert body["num_frames"] == 150
     assert len(body["session_id"]) > 20  # crypto-random, not guessable
-    assert body["ws_url"].endswith(body["session_id"])
+    # The WS URL must be a path, never an absolute ws://localhost/... URL:
+    # the SDK resolves it against its configured API base, which is what lets
+    # the same server build work locally and behind Render's proxy.
+    assert body["ws_url"] == f"/ws/sessions/{body['session_id']}"
+    assert not body["ws_url"].startswith(("ws://", "wss://", "http://", "https://"))
+    assert "localhost" not in body["ws_url"]
 
 
 def test_session_status_endpoint(fastapi_client):
