@@ -15,7 +15,7 @@ the authoritative **live / spoof** verdict.
 ```
 face-liveness-platform/
 ├── services/face-liveness-api/     FastAPI + WebSocket + PyTorch inference
-├── packages/face-liveness-sdk/     @thirduni/face-liveness-sdk (TypeScript)
+├── packages/face-liveness-sdk/     @mohammedabdelkrimguendouz/face-liveness-sdk (TypeScript)
 ├── apps/demo-web/                  Vite + React demo
 ├── docs/                           Protocol, deployment, troubleshooting
 ├── render.yaml                     Render blueprint (≥2 GB instance)
@@ -111,6 +111,12 @@ cp .env.example .env        # points at http://localhost:8000
 npm run dev                 # http://localhost:5173
 ```
 
+> The demo consumes the SDK from `packages/face-liveness-sdk` via a local
+> `file:` path. `npm run dev` and `npm run build` first run `build:sdk`
+> (`scripts/ensure-sdk.mjs`), which installs the SDK's dependencies and builds
+> `dist/` if it is missing or stale — so a fresh clone works with no extra
+> steps. The SDK's `dist/` is gitignored, so don't delete that hook.
+
 Open in a browser, allow camera access, click **Start verification**.
 
 > Camera access needs a secure context: `https://` or `http://localhost`.
@@ -123,8 +129,8 @@ npm install && npm run build
 ```
 
 ```ts
-import { LivenessClient } from "@thirduni/face-liveness-sdk";
-// or: import { useLiveness } from "@thirduni/face-liveness-sdk/react";
+import { LivenessClient } from "@mohammedabdelkrimguendouz/face-liveness-sdk";
+// or: import { useLiveness } from "@mohammedabdelkrimguendouz/face-liveness-sdk/react";
 
 const result = await new LivenessClient({ apiUrl: "https://api.example.com" }).start();
 console.log(result.prediction); // "live" | "spoof"

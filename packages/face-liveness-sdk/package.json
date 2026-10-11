@@ -1,5 +1,5 @@
 {
-  "name": "@thirduni/face-liveness-sdk",
+  "name": "@mohammedabdelkrimguendouz/face-liveness-sdk",
   "version": "0.1.0",
   "description": "Browser SDK for passive face liveness verification. Captures a facial frame sequence and streams it to a liveness backend over WebSocket.",
   "license": "MIT",

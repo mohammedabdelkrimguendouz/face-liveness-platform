@@ -12,7 +12,7 @@ the existing model, React demo, deployment configs, tests, and docs.
 | Stage | Deliverable | Status |
 |-------|-------------|--------|
 | 1 | FastAPI backend (WebSocket protocol, sessions, real inference) | ✅ 21/21 tests |
-| 2 | `@thirduni/face-liveness-sdk` (ESM+CJS+d.ts, React bindings) | ✅ 7/7 tests, packed + install-verified |
+| 2 | `@mohammedabdelkrimguendouz/face-liveness-sdk` (ESM+CJS+d.ts, React bindings) | ✅ 7/7 tests, packed + install-verified |
 | 3 | React demo (ui-ux-pro-max design system) | ✅ typecheck + build green, verified in browser |
 | 4 | `render.yaml`, `vercel.json`, deploy docs | ✅ prepared (not deployed — by design) |
 | 5 | README, protocol, troubleshooting, .gitignore, this report | ✅ |
@@ -269,8 +269,10 @@ covered by tests that now pass.
    package, or live deployment is claimed.**
 
 6. **Scoped package name unverified.**
-   `@thirduni/face-liveness-sdk` is assumed to be available/owned.
-   `docs/NPM.md` includes the `npm view` check and the fallback of renaming.
+   `@mohammedabdelkrimguendouz/face-liveness-sdk` is assumed to be available/owned.
+   The scope matches the npm username, so npm associates it with that account
+   by default (no org required). `docs/NPM.md` includes the `npm view` check
+   and the fallback of renaming.
 
 7. **Weights are in git (101.4 MB across the two checkpoints).**
    Both are committed at `services/face-liveness-api/models/`, so

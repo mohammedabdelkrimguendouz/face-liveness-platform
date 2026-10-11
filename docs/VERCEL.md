@@ -29,6 +29,18 @@ env var, not a runtime one. Changing it requires a re-deploy.
 `apps/demo-web/vercel.json` supplies `buildCommand`, `outputDirectory`, and an
 SPA rewrite so deep links resolve to `index.html`.
 
+### The SDK is built automatically
+
+`apps/demo-web` depends on the SDK through a local `file:` path, and the SDK's
+`dist/` is gitignored — so a fresh checkout has the SDK sources but no build
+output. Vercel's build therefore runs `build:sdk` first (`npm run build` is
+prefixed with it), which installs the SDK's dependencies and runs `tsup`:
+
+- No extra Vercel setting is required; `buildCommand` stays `npm run build`.
+- The SDK build adds roughly 10–15 s to the deploy.
+- If you publish the SDK to npm and switch the demo dependency to the registry
+  version, this hook becomes a no-op but can stay.
+
 ## After deploying
 
 Update the **API's** CORS allow-list to include your new Vercel origin, or the

@@ -5,12 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "predev": "npm run build:sdk",
+    "build:sdk": "node scripts/ensure-sdk.mjs",
+    "build": "npm run build:sdk && tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@thirduni/face-liveness-sdk": "file:../../packages/face-liveness-sdk",
+    "@mohammedabdelkrimguendouz/face-liveness-sdk": "file:../../packages/face-liveness-sdk",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

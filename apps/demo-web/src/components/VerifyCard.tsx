@@ -3,7 +3,7 @@ import {
   useLiveness,
   type LivenessResult,
   type LivenessPhase,
-} from "@thirduni/face-liveness-sdk/react";
+} from "@mohammedabdelkrimguendouz/face-liveness-sdk/react";
 import {
   CameraIcon,
   CheckCircleIcon,
