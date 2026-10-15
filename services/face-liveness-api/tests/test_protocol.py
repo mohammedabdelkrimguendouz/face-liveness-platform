@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
+import time
 from types import SimpleNamespace
 
 import cv2
@@ -37,16 +38,26 @@ def _frame(index: int, payload: bytes | None = None) -> bytes:
 class StubPipeline:
     """Fast stand-in that records inputs and returns a fixed result."""
 
-    def __init__(self, prediction="live", score=0.05):
+    def __init__(self, prediction="live", score=0.05, delay=0.0):
         self.is_ready = True
         self.load_error = None
         self.device = "cpu"
         self.config = SimpleNamespace(num_frames=REQUIRED)
         self.prediction = prediction
         self.score = score
+        # Wall-clock stall inside predict(), to exercise the window in which
+        # production inference takes 40-50 s.
+        self.delay = delay
+        # Callable invoked while the model is "working", so a test can land a
+        # terminal state on the session from inside the in-flight window.
+        self.side_effect = None
         self.calls = []
 
     def predict(self, frames):
+        if self.side_effect is not None:
+            self.side_effect(list(frames))
+        if self.delay:
+            time.sleep(self.delay)
         self.calls.append(list(frames))
         return SimpleNamespace(
             prediction=self.prediction,
@@ -428,7 +439,7 @@ def _infer_with(ws, session):
         # A fresh semaphore, because asyncio primitives are bound to the loop
         # that first awaits them and the app's own loop belongs to TestClient.
         main.INFER_SEMAPHORE = asyncio.Semaphore(1)
-        await main._run_inference(ws, session)
+        await main._run_inference(ws, session, asyncio.Lock())
 
     try:
         asyncio.run(run())
@@ -508,6 +519,12 @@ def test_successful_inference_with_dead_transport_reports_delivery_failure(
     assert session.state.value == "completed", "the model still answered; state stays completed"
     assert session.frames == {}, "frames are released either way"
 
+    # The traceback that precedes it must be attributable to a session, or a
+    # production log with several concurrent verifications is uninterpretable.
+    send_failures = [m for m in messages if m.startswith("ws_send_failed")]
+    assert send_failures, "the underlying transport error must still be logged"
+    assert f"session={session.session_id[:8]}" in send_failures[0], send_failures[0]
+
 
 def test_send_failure_logs_a_warning_with_traceback(fastapi_client):
     """Delivery failures must not be swallowed at DEBUG."""
@@ -578,3 +595,242 @@ def test_session_finalized_reported_when_client_leaves_early(fastapi_client, cap
     assert "delivered=False" in finalized[0]
     assert "state=cancelled" in finalized[0]
     assert token not in finalized[0]
+
+
+# ---------------------------------------------------------------------------
+# Long-running inference over a live socket
+#
+# Production inference takes 40-50 s. The old handler blocked in
+# ws.receive() for that whole window and sent nothing at all, so the server
+# could not notice a disconnect until the model finished, could not service
+# `cancel`, and left an idle connection that an idle-timeout proxy reaps.
+# These tests pin the window itself.
+# ---------------------------------------------------------------------------
+def test_slow_inference_keeps_socket_alive_and_still_delivers(fastapi_client, monkeypatch):
+    """A client that stays connected for the whole inference must get an answer.
+
+    The connection has to carry real frames during the stall — protocol-level
+    pings alone are invisible to a proxy that only inspects data frames, and
+    the user otherwise cannot tell "still thinking" from "link dead".
+    """
+    from app import main
+
+    monkeypatch.setattr(main, "INFERENCE_KEEPALIVE_SECONDS", 0.05)
+
+    stub = _install_stub(fastapi_client, prediction="spoof", score=0.9925)
+    stub.delay = 0.30  # ~6 keepalive intervals, i.e. a long inference in miniature
+    sid, token = _session(fastapi_client)
+
+    with fastapi_client.websocket_connect(f"/ws/sessions/{sid}?token={token}") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        for i in range(REQUIRED):
+            ws.send_bytes(_frame(i))
+        _final, collected = _recv_until(ws, lambda m: m["type"] == "result")
+
+    kinds = [m["type"] for m in collected]
+    assert kinds.count("progress") >= 3, f"keepalives missing from {kinds}"
+    assert "processing" in kinds, "the client must be told inference began"
+    assert kinds[-1] == "result", "the verdict is the last frame on the wire"
+    assert collected[-1]["prediction"] == "spoof"
+
+    # Keepalives are exposed to the UI, so they must never carry a secret.
+    wire = json.dumps(collected)
+    assert token not in wire
+    assert "token" not in wire
+
+
+def test_client_disconnect_during_slow_inference_is_seen_immediately(
+    fastapi_client, monkeypatch, caplog
+):
+    """Reproduces the production failure, with the decisive detail pinned.
+
+    The server must notice the departure *while the model is still working*
+    (`inference_running=True`) instead of only discovering it seconds later
+    when the result fails to leave. That difference is what distinguishes
+    "something closed the socket early" from "the model took too long".
+    """
+    from app import main
+
+    monkeypatch.setattr(main, "INFERENCE_KEEPALIVE_SECONDS", 0.05)
+
+    stub = _install_stub(fastapi_client, prediction="spoof", score=0.9925)
+    stub.delay = 0.40
+    sid, token = _session(fastapi_client)
+
+    with caplog.at_level("INFO", logger="liveness"):
+        with fastapi_client.websocket_connect(f"/ws/sessions/{sid}?token={token}") as ws:
+            assert ws.receive_json()["type"] == "ready"
+            for i in range(REQUIRED):
+                ws.send_bytes(_frame(i))
+            # Get to mid-inference, then hang up with the model still busy.
+            _msg, _ = _recv_until(ws, lambda m: m["type"] == "processing")
+        # `with` exits here: the socket closes during inference.
+
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            if any(
+                r.getMessage().startswith("session_finalized") for r in caplog.records
+            ):
+                break
+            time.sleep(0.05)
+
+    messages = [r.getMessage() for r in caplog.records]
+
+    gone = [m for m in messages if m.startswith("ws_client_gone")]
+    assert gone, "the server must observe the disconnect"
+    assert "inference_running=True" in gone[0], gone[0]
+    assert "via=message" in gone[0] or "via=exception" in gone[0], gone[0]
+
+    # The model still ran to completion — it is not what failed.
+    assert any(m.startswith("inference_completed") for m in messages)
+
+    failed = [m for m in messages if m.startswith("result_send_failed")]
+    assert failed and "stage=after_inference" in failed[0], failed
+    assert any(m.startswith("result_send_succeeded") for m in messages) is False
+
+    finalized = [m for m in messages if m.startswith("session_finalized")]
+    assert finalized, "a detached inference must still finalize the session"
+    assert "delivered=False" in finalized[0]
+
+    # Diagnostic logs must never carry the capability token.
+    assert token not in " ".join(messages)
+
+
+def test_cancel_during_inference_supersedes_the_result(fastapi_client, monkeypatch, caplog):
+    """A cancel that arrives mid-inference wins; no late `result` may follow.
+
+    Cancellation was unreachable while inference blocked the receive loop, so
+    this ordering did not have to be defined before. It does now.
+    """
+    from app import main
+
+    monkeypatch.setattr(main, "INFERENCE_KEEPALIVE_SECONDS", 0.05)
+
+    stub = _install_stub(fastapi_client, prediction="live", score=0.05)
+    stub.delay = 0.30
+    sid, token = _session(fastapi_client)
+
+    with caplog.at_level("INFO", logger="liveness"):
+        with fastapi_client.websocket_connect(f"/ws/sessions/{sid}?token={token}") as ws:
+            assert ws.receive_json()["type"] == "ready"
+            for i in range(REQUIRED):
+                ws.send_bytes(_frame(i))
+            _msg, _ = _recv_until(ws, lambda m: m["type"] == "processing")
+            ws.send_text(json.dumps({"type": "cancel"}))
+            _msg, collected = _recv_until(ws, lambda m: m["type"] == "cancelled")
+
+        deadline = time.time() + 10.0
+        while time.time() < deadline and not any(
+            r.getMessage().startswith("session_finalized") for r in caplog.records
+        ):
+            time.sleep(0.05)
+
+    assert "result" not in [m["type"] for m in collected], "cancelled session must not answer"
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("inference_discarded") for m in messages), messages
+    finalized = [m for m in messages if m.startswith("session_finalized")]
+    assert finalized and "delivered=False" in finalized[0], finalized
+    assert token not in " ".join(messages)
+
+
+def test_cancel_that_beats_the_inference_task_skips_inference(fastapi_client, caplog):
+    """`create_task` only schedules; a `cancel` can be processed first.
+
+    When that happens the frame buffer is already cleared, so running the
+    model would hand it a truncated sequence and then emit an `inference_error`
+    for a session that never asked to fail.
+    """
+    from app.sessions import SessionState
+
+    session = _populated_session(fastapi_client, prediction="live", score=0.05)
+    session.state = SessionState.CANCELLED
+    session.frames.clear()
+    ws = _CapturingWS()
+
+    with caplog.at_level("INFO", logger="liveness"):
+        _infer_with(ws, session)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "inference_discarded" in m and "reason=cancelled_before_start" in m
+        for m in messages
+    ), messages
+    assert session.state.value == "cancelled", "the cancel must not be overwritten"
+    assert session.result_delivered is False
+    assert ws.sent == [], "nothing may be sent to a session that already cancelled"
+    assert not any(m.startswith("inference_started") for m in messages)
+    assert not any(m.startswith("inference_error") for m in messages)
+
+
+def test_terminal_failure_while_the_model_runs_suppresses_the_result(
+    fastapi_client, monkeypatch, caplog
+):
+    """The receive loop stays open during inference, so errors can land mid-run.
+
+    A session that has already failed must not then be answered with a
+    `result`: the client has the terminal error, and the two would contradict
+    each other. The state must stay `failed` rather than be overwritten.
+    """
+    from app import main
+    from app.sessions import SessionError, SessionState
+
+    monkeypatch.setattr(main, "INFERENCE_KEEPALIVE_SECONDS", 0.05)
+    session = _populated_session(fastapi_client, prediction="live", score=0.05)
+    stub = main.PIPELINE
+
+    def fail_midway(_frames):
+        session.state = SessionState.FAILED
+        session.error = SessionError("frame_too_large", "Frame exceeds size limit")
+
+    stub.side_effect = fail_midway
+    ws = _CapturingWS()
+
+    with caplog.at_level("INFO", logger="liveness"):
+        _infer_with(ws, session)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "inference_discarded" in m and "reason=session_failed_during_inference" in m
+        for m in messages
+    ), messages
+    assert session.state.value == "failed", "the failure must not be overwritten"
+    assert session.result_delivered is False
+    assert not any(json.loads(s)["type"] == "result" for s in ws.sent), ws.sent
+    assert not any(m.startswith("inference_completed") for m in messages)
+
+
+def test_uvicorn_access_log_redacts_the_token_but_keeps_the_session_path():
+    """uvicorn logs the raw upgrade path; a capability token must not survive.
+
+    `"WebSocket /ws/sessions/<id>?token=<secret>" [accepted]` is written by
+    uvicorn itself, before any application code runs, so the redaction has to
+    be a logging filter installed on uvicorn's own loggers.
+    """
+    import logging
+
+    from app.main import _RedactTokenFilter
+
+    record = logging.LogRecord(
+        name="uvicorn.error",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg='127.0.0.1:53114 - "WebSocket /ws/sessions/%s?token=%s HTTP/1.1" [accepted]',
+        args=("abc123def456", "SUPERSECRETTOKENVALUE"),
+        exc_info=None,
+    )
+
+    assert _RedactTokenFilter().filter(record) is True
+
+    text = record.getMessage()
+    assert "SUPERSECRETTOKENVALUE" not in text, text
+    assert "token=<redacted>" in text, text
+    assert "abc123def456" in text, "the session path stays correlatable for debugging"
+
+    # An ordinary line must pass through untouched.
+    plain = logging.LogRecord(
+        name="uvicorn.error", level=logging.INFO, pathname=__file__, lineno=1,
+        msg="Uvicorn running on 0.0.0.0:8000", args=(), exc_info=None,
+    )
+    assert _RedactTokenFilter().filter(plain) is True
+    assert plain.getMessage() == "Uvicorn running on 0.0.0.0:8000"

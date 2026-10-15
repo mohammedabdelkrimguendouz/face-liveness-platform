@@ -12,6 +12,7 @@ import {
   StopIcon,
   XCircleIcon,
 } from "./icons";
+import logoUrl from "../logo.jfif";
 
 const API_URL =
   (import.meta.env.VITE_LIVENESS_API_URL as string | undefined) ??
@@ -48,6 +49,36 @@ function isActive(phase: LivenessPhase): boolean {
   );
 }
 
+/** Copy for the placeholder shown whenever no live camera frame is visible. */
+function placeholderFor(phase: LivenessPhase): {
+  spinner: boolean;
+  title: string;
+  hint?: string;
+} {
+  switch (phase) {
+    case "requesting-permission":
+      return { spinner: true, title: "Requesting camera access…" };
+    case "connecting":
+      return { spinner: true, title: "Starting the camera…" };
+    case "processing":
+      return { spinner: true, title: "Analyzing your video…" };
+    case "failed":
+    case "cancelled":
+      return { spinner: false, title: "Camera released." };
+    default:
+      return {
+        spinner: false,
+        title: "Position your face in the frame.",
+        hint: "The check runs passively — no action required.",
+      };
+  }
+}
+
+/** `1234 ms` below a second, `43.4 s` above — keeps result chips compact. */
+function formatDuration(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`;
+}
+
 export function VerifyCard(): React.ReactElement {
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
   const {
@@ -58,7 +89,6 @@ export function VerifyCard(): React.ReactElement {
     isRunning,
     start,
     cancel,
-    reset,
   } = useLiveness({ apiUrl: API_URL, targetFps: 20, jpegQuality: 85 });
 
   const [stream, setStream] = React.useState<MediaStream | null>(null);
@@ -87,11 +117,6 @@ export function VerifyCard(): React.ReactElement {
     });
   }, [start]);
 
-  const handleReset = React.useCallback(() => {
-    setStream(null);
-    reset();
-  }, [reset]);
-
   const step = phaseToStep(phase);
   const active = isActive(phase);
   const showPreview = active && phase !== "processing" && stream !== null;
@@ -102,7 +127,17 @@ export function VerifyCard(): React.ReactElement {
   return (
     <section className="card verify-card" aria-labelledby="verify-title">
       <div className="verify-head">
-        <h2 id="verify-title">Liveness check</h2>
+        <div className="verify-head__title">
+          <img
+            className="verify-head__logo"
+            src={logoUrl}
+            alt=""
+            width={22}
+            height={22}
+            aria-hidden="true"
+          />
+          <h2 id="verify-title">Face Verification</h2>
+        </div>
         <StatusPill phase={phase} result={result} />
       </div>
 
@@ -110,10 +145,10 @@ export function VerifyCard(): React.ReactElement {
 
       {/* ---- Result state ---- */}
       {phase === "completed" && result ? (
-        <ResultView result={result} onReset={handleReset} />
+        <ResultView result={result} onStart={handleStart} />
       ) : (
         <>
-          {/* ---- Camera preview / placeholder ---- */}
+          {/* ---- Camera preview / state placeholder ---- */}
           <div className="preview">
             {showPreview ? (
               <video
@@ -125,27 +160,7 @@ export function VerifyCard(): React.ReactElement {
                 aria-label="Live camera preview"
               />
             ) : (
-              <div className="preview__placeholder">
-                {phase === "processing" ? (
-                  <>
-                    <div className="spinner" role="status" aria-label="Processing" />
-                    <p>Analyzing your frames…</p>
-                  </>
-                ) : phase === "failed" || phase === "cancelled" ? (
-                  <>
-                    <CameraIcon width={36} height={36} />
-                    <p>Camera released.</p>
-                  </>
-                ) : (
-                  <>
-                    <CameraIcon width={36} height={36} />
-                    <p>
-                      Position your face in the frame. The check runs passively —
-                      no action required.
-                    </p>
-                  </>
-                )}
-              </div>
+              <Placeholder phase={phase} />
             )}
             {(active || phase === "processing") && (
               <span
@@ -192,18 +207,10 @@ export function VerifyCard(): React.ReactElement {
           {/* ---- Actions ---- */}
           <div className="btn-row">
             {!isRunning ? (
-              <button
-                type="button"
-                className="btn btn--primary"
-                onClick={phase === "failed" || phase === "cancelled" ? handleReset : handleStart}
-              >
+              <button type="button" className="btn btn--primary" onClick={handleStart}>
                 {phase === "failed" || phase === "cancelled" ? (
                   <>
                     <RefreshIcon width={18} height={18} /> Try again
-                  </>
-                ) : phase === "completed" ? (
-                  <>
-                    <RefreshIcon width={18} height={18} /> Verify another
                   </>
                 ) : (
                   <>
@@ -219,13 +226,24 @@ export function VerifyCard(): React.ReactElement {
           </div>
         </>
       )}
-
-      <p className="note">
-        The model runs server-side. Frames are streamed over WebSocket, analyzed,
-        and the authoritative <strong>live / spoof</strong> decision is made by the
-        backend — never in your browser.
-      </p>
     </section>
+  );
+}
+
+function Placeholder({ phase }: { phase: LivenessPhase }): React.ReactElement {
+  const { spinner, title, hint } = placeholderFor(phase);
+  return (
+    <div className="preview__placeholder">
+      {spinner ? (
+        <div className="spinner" role="status" aria-label={title} />
+      ) : (
+        <span className="preview__placeholder-icon" aria-hidden="true">
+          <CameraIcon width={32} height={32} />
+        </span>
+      )}
+      <p className="preview__placeholder-title">{title}</p>
+      {hint ? <p className="preview__placeholder-hint">{hint}</p> : null}
+    </div>
   );
 }
 
@@ -250,11 +268,20 @@ function StatusPill({
   } else if (phase === "failed") {
     cls += " pill--failed";
     label = "Failed";
-  } else if (isActive(phase)) {
-    cls += " pill--active";
-    label = phase === "processing" ? "Analyzing" : "In progress";
   } else if (phase === "cancelled") {
     label = "Cancelled";
+  } else if (phase === "requesting-permission" || phase === "connecting") {
+    cls += " pill--active";
+    label = "Starting";
+  } else if (phase === "processing") {
+    cls += " pill--active";
+    label = "Analyzing";
+  } else if (phase === "capturing") {
+    cls += " pill--active";
+    label = "Capturing";
+  } else if (phase === "transmitting") {
+    cls += " pill--active";
+    label = "Uploading";
   } else {
     label = "Ready";
   }
@@ -290,56 +317,47 @@ function Steps({ current }: { current: number }): React.ReactElement {
 
 function ResultView({
   result,
-  onReset,
+  onStart,
 }: {
   result: LivenessResult;
-  onReset: () => void;
+  onStart: () => void;
 }): React.ReactElement {
   const live = result.prediction === "live";
   return (
     <div className="result">
       <div className={`result__badge result__badge--${live ? "live" : "spoof"}`}>
         {live ? (
-          <CheckCircleIcon width={40} height={40} />
+          <CheckCircleIcon width={38} height={38} />
         ) : (
-          <XCircleIcon width={40} height={40} />
+          <XCircleIcon width={38} height={38} />
         )}
       </div>
-      <h3 className={`result__title ${live ? "result__live" : "result__spoof"}`}>
-        {live ? "Live person verified" : "Spoof attempt detected"}
-      </h3>
-      <p>
-        {live
-          ? "The sequence reconstructed as expected for a real face."
-          : "The sequence did not match a live face. A printed photo, screen replay, or mask may have been presented."}
-      </p>
+
+      <div className="result__text">
+        <h3 className={`result__title ${live ? "result__live" : "result__spoof"}`}>
+          {live ? "Live person verified" : "Spoof attempt detected"}
+        </h3>
+        <p className="result__desc">
+          {live
+            ? "A real person is present. You can continue."
+            : "The sequence did not match a live face. A photo, screen, or mask may have been presented."}
+        </p>
+      </div>
 
       <div className="metrics">
         <div className="metric">
-          <div className="metric__label">Anomaly score</div>
-          <div className="metric__value">{result.anomalyScore.toFixed(4)}</div>
-        </div>
-        <div className="metric">
-          <div className="metric__label">Threshold</div>
-          <div className="metric__value">{result.threshold.toFixed(2)}</div>
-        </div>
-        <div className="metric">
-          <div className="metric__label">Frames</div>
+          <div className="metric__label">Frames analyzed</div>
           <div className="metric__value">{result.framesProcessed}</div>
         </div>
         <div className="metric">
-          <div className="metric__label">Server inference</div>
-          <div className="metric__value">{Math.round(result.inferenceMs)} ms</div>
+          <div className="metric__label">Analysis time</div>
+          <div className="metric__value">{formatDuration(result.inferenceMs)}</div>
         </div>
       </div>
 
-      <p className="note">
-        Score = 1 − exp(−reconstruction error). Higher means more anomalous; a
-        score above the threshold is classified as a spoof. This is an anomaly
-        score, not a calibrated probability.
-      </p>
+      <p className="result__ref">Verification ID: {result.sessionId.slice(0, 8)}</p>
 
-      <button type="button" className="btn btn--primary" onClick={onReset}>
+      <button type="button" className="btn btn--primary" onClick={onStart}>
         <RefreshIcon width={18} height={18} /> Verify another
       </button>
     </div>

@@ -53,6 +53,17 @@ class Session:
     # Kept separately from `state` so a successful inference whose result
     # never left the server is still visible as a delivery failure.
     result_delivered: bool = False
+    # Set the moment the socket is observed to be gone, which can happen long
+    # before the model finishes. Distinguishes "the client left at second 9"
+    # from "the model took 43 seconds".
+    accepted_at: Optional[float] = None
+    client_gone_at: Optional[float] = None
+    # Finalization is idempotent: it can be reached from the connection's
+    # teardown and again from a detached inference task.
+    finalized: bool = False
+    # Last inbound activity, so a disconnect can be located on a timeline.
+    last_frame_index: Optional[int] = None
+    frames_received: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property

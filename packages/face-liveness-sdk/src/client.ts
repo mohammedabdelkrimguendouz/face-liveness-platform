@@ -46,6 +46,8 @@ export class LivenessClient {
   private readonly cb: LivenessCallbacks;
   private camera: CameraHandle | null = null;
   private ws: WebSocket | null = null;
+  /** When the socket was constructed; used to age close/error diagnostics. */
+  private wsOpenedAt = 0;
   private phase: LivenessPhase = "idle";
   private captured = 0;
   private required = FALLBACK_REQUIRED_FRAMES;
@@ -223,17 +225,38 @@ export class LivenessClient {
       const ws = new WebSocket(withWsToken(session.wsUrl, session.wsToken));
       ws.binaryType = "arraybuffer";
       this.ws = ws;
+      this.wsOpenedAt = performance.now();
 
-      ws.onerror = () => fail(new LivenessError("connection-failed", "WebSocket connection error."));
+      /**
+       * Every close/error is described by the four facts a support ticket
+       * actually needs. `wasClean=false` with a low code points at the network
+       * or a proxy; a clean close with 1011 points at the server. Elapsed time
+       * localises the event on the verification timeline.
+       */
+      const describe = (ev: { code?: number; reason?: string; wasClean?: boolean }): string => {
+        const elapsedMs = Math.round(performance.now() - this.wsOpenedAt);
+        return `code=${ev.code ?? "n/a"} reason=${ev.reason || "none"} ` +
+          `wasClean=${ev.wasClean ?? "n/a"} elapsedMs=${elapsedMs}`;
+      };
+
+      ws.onerror = () =>
+        fail(
+          new LivenessError(
+            "connection-failed",
+            `WebSocket connection error (${describe({})}).`,
+            "socket-error",
+          )
+        );
 
       ws.onclose = (ev) => {
         // After an intentional cancel/teardown, ignore the close event so it
         // does not surface as a spurious connection error.
         if (settled || this.cancelled) return;
-        if (ev.code === 4401) fail(new LivenessError("session-failed", "Invalid session token."));
-        else if (ev.code === 4404) fail(new LivenessError("session-failed", "Session not found or expired."));
-        else if (ev.code === 4409) fail(new LivenessError("session-failed", "Session already used."));
-        else fail(new LivenessError("connection-failed", `Connection closed (code ${ev.code}).`));
+        const detail = describe(ev);
+        if (ev.code === 4401) fail(new LivenessError("session-failed", `Invalid session token (${detail}).`));
+        else if (ev.code === 4404) fail(new LivenessError("session-failed", `Session not found or expired (${detail}).`));
+        else if (ev.code === 4409) fail(new LivenessError("session-failed", `Session already used (${detail}).`));
+        else fail(new LivenessError("connection-failed", `Connection closed unexpectedly (${detail}).`, detail));
       };
 
       ws.onmessage = (ev) => {
@@ -254,6 +277,13 @@ export class LivenessClient {
             this.emit("transmitting", "Uploading frames to the verification service…");
             break;
           case "processing":
+            this.setPhase("processing");
+            this.emit("processing", "Analyzing your video…");
+            break;
+          case "progress":
+            // Server keepalive emitted while the model runs. It proves the
+            // connection is alive during the multi-second inference window
+            // rather than leaving the user staring at a frozen spinner.
             this.setPhase("processing");
             this.emit("processing", "Analyzing your video…");
             break;

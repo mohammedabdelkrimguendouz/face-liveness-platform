@@ -107,9 +107,20 @@ shortcut for detecting gaps sooner.
 | `ready` | `session_id`, `required_frames`, `max_frame_bytes` | Sent once on accept. |
 | `ack` | `received`, `required` | Throttled: every 10 frames, and at completion. |
 | `processing` | `received` | Inference started. |
+| `progress` | `stage`, `elapsed_ms` | Keepalive while the model runs, every 5 s until it finishes. Not terminal. |
 | `result` | see below | Terminal success. |
 | `error` | `error`, `message`, optional `missing` | Terminal or recoverable (see below). |
 | `cancelled` | — | Acknowledges `{"type":"cancel"}`. |
+
+`progress` exists because a CPU inference legitimately takes tens of seconds.
+Without it the connection would carry no application traffic for that whole
+window, which is both indistinguishable from a dead link at the client and
+indistinguishable from an idle connection to a proxy that only counts data
+frames. Clients must ignore unknown message types, so `progress` is additive.
+
+A `cancel` is honoured even while inference runs: the server replies
+`cancelled` immediately, discards the in-flight verdict, and never sends a
+`result` afterwards.
 
 #### `result`
 

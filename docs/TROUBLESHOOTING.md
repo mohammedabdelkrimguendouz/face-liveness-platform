@@ -52,23 +52,85 @@ it — but the browser reported `Verification failed / Connection closed (code
 1011)`.
 
 A successful inference and a delivered result are **different events**. Read
-the four stage lines that follow `Inference done`, all tagged with the same
-8-character session prefix:
+the stage lines for the same 8-character session prefix, in order:
 
 | Log line | Meaning |
 |----------|---------|
+| `ws_accepted session=…` | Handshake accepted; `elapsed_ms` on later lines is counted from here. |
+| `inference_scheduled session=… frames_received=… last_frame_index=…` | The 150th frame arrived and the model was queued. |
+| `inference_started session=… queued_ms=…` | The model actually began. |
+| `ws_client_gone session=… state=… via=… inference_running=… elapsed_ms=…` | **The decisive line when the client leaves early.** `inference_running=True` means the socket died *during* the model's run, and `elapsed_ms` says exactly when. `via=message` / `via=exception` records which path revealed it. Absent when the client stayed connected. |
 | `inference_completed session=… prediction=… score=… ms=…` | The model answered. `prediction=spoof` here is a valid verdict, not a fault. |
 | `result_send_started session=…` | The server began handing the result to the transport. |
 | `result_send_succeeded session=…` | It reached the socket. If the client still failed, the problem is downstream of the API. |
-| `result_send_failed session=… stage=after_inference` | **Inference was fine; delivery was not.** Usually the client or a proxy dropped the connection during the (tens-of-seconds) inference window. |
-| `session_finalized session=… state=… delivered=…` | Exactly one per connection. `delivered=False` confirms the answer never left the server. |
-| `websocket_error session=…` | An uncaught exception, with traceback. An exception that escapes the handler is what makes `websockets` answer the client with close code **1011**. |
+| `result_send_failed session=… stage=after_inference client_left_after_ms=…` | **Inference was fine; delivery was not.** `client_left_after_ms` matches the `ws_client_gone` line. |
+| `session_finalized session=… state=… delivered=… reason=… client_left_after_ms=…` | Exactly one per connection. `delivered=False` confirms the answer never left the server; `reason=` says why (`connection_closed`, `inference_finished_after_client_left`, `inference_finished_after_cancel`). |
+| `ws_send_failed type=result session=…` | The underlying transport error, with traceback. This is what names the failure mode (`ClientDisconnected`, a closed ASGI channel, …). |
+| `websocket_error session=…` | An uncaught exception, with traceback. One of the two ways the client can end up seeing close code **1011** — see “Where a 1011 close actually comes from” below. |
 
-If the browser reports **1011**, the server log must contain one of
-`websocket_error`, `connection handler failed` or `data transfer failed`,
-all with a full traceback. `result_send_failed` with **no** accompanying
-`websocket_error` means the client went away first — check proxy idle
-timeouts and the `LIVENESS_SESSION_TTL` for long inference windows.
+#### Where a 1011 close actually comes from
+
+The application never sends `1011`; it either delivers a `result` or closes
+before `accept()` with a `44xx` code. In this stack (uvicorn + the `websockets`
+library) only `websockets`' own `fail_connection(1011)` can put a `1011` close
+frame on the wire, and it has four call sites — three of them are effectively
+unreachable from this handler, one is not:
+
+| Source | Visible in the log? | Reachable here? |
+|--------|---------------------|-----------------|
+| **Keepalive ping timeout** (`reason="keepalive ping timeout"`) | **No — DEBUG only** | **Yes.** Fires when a Pong is not processed within `--ws-ping-timeout` (uvicorn default 20 s). |
+| `connection handler failed` | ERROR + traceback | No: the handler only awaits `wait_closed()`, which does not raise. |
+| `data transfer failed` | ERROR + traceback | Only from an unexpected exception while *reading* — i.e. while the client is still sending. |
+| interrupted fragmented send | ERROR + traceback | No: server messages are single JSON frames. |
+
+So the diagnosis starts from the two logs you can actually read:
+
+* **No `websocket_error` and no websockets ERROR** alongside
+  `result_send_failed … stage=after_inference` → the server itself failed the
+  connection: the ping timeout. **Confirm it with the reason string** — the
+  browser's close event carries it, and the SDK now prints it:
+  `Connection closed unexpectedly (code=1011 reason=keepalive ping timeout
+  wasClean=true elapsedMs=…)` in the UI/console, and the
+  `ws_send_failed … ` traceback on the server names the same
+  `ConnectionClosed` line. `reason="keepalive ping timeout"` ⇒ the Pong did
+  not arrive within the deadline.
+* **`websocket_error` present** → an exception escaped the handler; its
+  traceback is the cause, and the 1011 is a symptom.
+
+`result_send_failed` with **no** accompanying `websocket_error` and a close
+reason *other than* `keepalive ping timeout` means something between the two
+ends dropped the socket — go to `ws_client_gone`: `inference_running=True`
+with a small `elapsed_ms` means it died while the model was still working
+(proxy or client idle timeout), whereas an `elapsed_ms` at or past the
+inference duration means the connection survived the whole run and the loss
+happened afterwards.
+
+Three things keep that ping timeout from firing during a long inference:
+
+1. `--ws-ping-timeout 60` in `render.yaml` (only the deadline is relaxed; the
+   20 s interval is unchanged), so one lost or delayed pong cannot end a
+   verification that is seconds from finishing;
+2. the receive loop stays open for the whole inference, so `websockets` keeps
+   draining the inbound queue — when the application stops calling `receive`
+   with 32+ messages queued, the library stops reading the socket entirely,
+   **control frames included**, and the Pong can no longer be processed;
+3. `progress` frames every 5 s, so the connection is never silent long enough
+   for an idle timer to matter.
+
+`tests/test_real_transport.py` pins all three against a real uvicorn server:
+a ponging peer survives a 46 s inference, a peer that never answers pings is
+reproduced dying with exactly `Close(1011, "keepalive ping timeout")` and the
+production log sequence, and the pinned ping policy keeps that silent peer
+alive.
+
+While inference runs the server emits `progress` frames every 5 s, so a
+connection that is genuinely healthy carries traffic in both directions for
+the entire window rather than sitting silent for tens of seconds.
+
+Uvicorn's own upgrade line logs the full request path, so it contains the
+capability token. `?token=` is rewritten to `token=<redacted>` by a logging
+filter on uvicorn's loggers; if you ever see a raw token there, the filter was
+bypassed (for example by a custom `--log-config`).
 
 ### WebSocket closes immediately
 
@@ -80,9 +142,14 @@ timeouts and the `LIVENESS_SESSION_TTL` for long inference windows.
 | `1006` (client) | Network drop or the API is behind a proxy without WebSocket support. |
 
 **Render/proxy note:** Render's proxy supports WebSockets, but some
-CDNs/proxies time out idle connections. The client sends frames every ~50 ms,
-so this shouldn't trigger — but if you front the API with another proxy, ensure
-WebSocket upgrade is enabled and the idle timeout exceeds 60 s.
+CDNs/proxies time out connections that carry no *data* frames for a configured
+period, and they do not necessarily count protocol-level ping/pong frames. The
+client stops sending after its 150th frame, and inference then runs for tens
+of seconds — that window used to be completely silent. The server now emits a
+`progress` frame every 5 s during inference; if you front the API with another
+proxy, keep its idle timeout above 60 s as well. Note that a proxy timeout
+would appear as `ws_client_gone … inference_running=True` in the server log,
+not as a server-side error.
 
 ### `Origin ... not allowed` (CORS)
 

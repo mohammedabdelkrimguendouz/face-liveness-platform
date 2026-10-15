@@ -34,9 +34,23 @@ services:
       pip install --no-cache-dir -r requirements.txt
       && python scripts/fetch_models.py
 
+    # --ws-ping-timeout 60 (interval left at uvicorn's 20 s default):
+    # websockets closes the connection with code 1011 and the reason
+    # "keepalive ping timeout" when a Pong is not processed within
+    # `ws_ping_timeout` — and it logs nothing at `--log-level info`, so the
+    # server looked healthy while the browser reported
+    # "Connection closed (code 1011)". A single lost or delayed pong must not
+    # destroy a verification that is seconds from completing (inference alone
+    # is ~43 s on CPU), so only the pong deadline is relaxed; the 20 s
+    # interval still detects a genuinely dead peer within ~80 s, and the
+    # every-5 s `progress` frames plus the always-reading receive loop give a
+    # faster and better-logged liveness signal anyway.
+    # Pinned explicitly so local runs and production share one policy and a
+    # regression is visible in tests/test_real_transport.py rather than as an
+    # outage. See docs/TROUBLESHOOTING.md ("close code 1011").
     startCommand: >
       uvicorn app.main:app --host 0.0.0.0 --port $PORT
-      --workers 1 --log-level info
+      --workers 1 --log-level info --ws-ping-timeout 60
 
     envVars:
       # Single worker: sessions are in-memory, so multiple workers would break

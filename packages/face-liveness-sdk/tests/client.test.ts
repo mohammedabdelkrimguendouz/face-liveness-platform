@@ -16,7 +16,9 @@ class MockWebSocket {
   sent: (string | ArrayBuffer)[] = [];
   onopen: (() => void) | null = null;
   onmessage: ((ev: { data: string | ArrayBuffer }) => void) | null = null;
-  onclose: ((ev: { code: number }) => void) | null = null;
+  onclose:
+    | ((ev: { code: number; reason?: string; wasClean?: boolean }) => void)
+    | null = null;
   onerror: (() => void) | null = null;
 
   constructor(public url: string) {
@@ -25,9 +27,10 @@ class MockWebSocket {
   send(data: string | ArrayBuffer) {
     this.sent.push(data);
   }
-  close(code = 1000) {
+  // Local close, i.e. what the SDK's own teardown() calls.
+  close(code = 1000, reason = "") {
     this.readyState = 3;
-    this.onclose?.({ code });
+    this.onclose?.({ code, reason, wasClean: true });
   }
   // test helpers
   _open() {
@@ -36,6 +39,16 @@ class MockWebSocket {
   }
   _msg(obj: unknown) {
     this.onmessage?.({ data: JSON.stringify(obj) });
+  }
+  /**
+   * Close initiated by the peer rather than by us. The reason string is what
+   * makes the production incident identifiable: websockets labels its 1011
+   * kill "keepalive ping timeout", while a proxy kill carries another (or no)
+   * reason, and the SDK now reports both.
+   */
+  _serverClose(code: number, reason = "", wasClean = true) {
+    this.readyState = 3;
+    this.onclose?.({ code, reason, wasClean });
   }
 }
 
@@ -306,6 +319,213 @@ describe("LivenessClient", () => {
     await assertion;
     expect(onError).toHaveBeenCalled();
     vi.useRealTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Timeout contract + close/keepalive diagnostics.
+//
+// Production showed "Connection closed (code 1011)" at ~52 s while the SDK
+// default timeout is 120 000 ms, so these pin two things that must stay
+// true: the timeout only ever fires when it is configured to, and when the
+// server fails the connection the error carries the code, the reason and the
+// cleanliness flag needed to tell a server-side failure from a proxy kill.
+// ---------------------------------------------------------------------------
+describe("LivenessClient — timeout and connection diagnostics", () => {
+  const RESULT_MSG = {
+    type: "result",
+    session_id: "sess123",
+    prediction: "live",
+    anomaly_score: 0.04,
+    reconstruction_error: 0.041,
+    threshold: 0.5,
+    frames_processed: REQUIRED,
+    inference_ms: 43_390,
+  };
+
+  /** Flush microtasks (fetch → camera → session → WebSocket) without time. */
+  async function flush(n = 12): Promise<void> {
+    for (let i = 0; i < n; i++) await vi.advanceTimersByTimeAsync(0);
+  }
+
+  /**
+   * Pump the fake clock in small steps until `cond` holds. Fixed advances are
+   * brittle here: every captured frame costs the sleep interval plus the
+   * canvas/encode microtask chain, so the exact fake-ms cost per frame is not
+   * a clean multiple of the interval.
+   */
+  async function advanceUntil(
+    cond: () => boolean,
+    budgetMs = 5000,
+    stepMs = 50,
+  ): Promise<void> {
+    for (let spent = 0; !cond() && spent < budgetMs; spent += stepMs) {
+      await vi.advanceTimersByTimeAsync(stepMs);
+    }
+  }
+
+  it("does not fire the default result timeout during a 119-second verification", async () => {
+    vi.useFakeTimers();
+    try {
+      const onError = vi.fn();
+      let settled = false;
+      const client = new LivenessClient(
+        { apiUrl: "http://localhost:8000", targetFps: 200 },
+        { onError },
+      );
+      const promise = client.start();
+      promise.then(
+        () => { settled = true; },
+        () => { settled = true; },
+      );
+
+      await flush();
+      expect(MockWebSocket.instances.length).toBe(1);
+      const ws = MockWebSocket.instances[0];
+      ws._open();
+      ws._msg({ type: "ready", required_frames: REQUIRED });
+
+      // Capture 150 frames at 200 fps (5 ms apart) — under 1 s of fake time.
+      await advanceUntil(() => binaryFrames(ws).length === REQUIRED);
+      expect(binaryFrames(ws).length).toBe(REQUIRED);
+
+      // ~119 s of the 120 s default budget elapse with the socket silent —
+      // exactly the shape of a long CPU inference. Nothing may fire. The
+      // budget is deliberately kept short of 120 000 ms total so the default
+      // deadline itself is not the thing that settles the promise.
+      await vi.advanceTimersByTimeAsync(118_000);
+      expect(settled).toBe(false);
+      expect(onError).not.toHaveBeenCalled();
+      expect(ws.readyState).toBe(MockWebSocket.OPEN);
+
+      // The verdict still arrives and resolves normally.
+      ws._msg({ type: "processing", received: REQUIRED });
+      ws._msg(RESULT_MSG);
+      const result = await promise;
+      expect(result.prediction).toBe("live");
+      expect(settled).toBe(true);
+
+      // teardown() cleared the timer: crossing 120 s afterwards must not
+      // produce a spurious timeout on a finished verification.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(onError).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fires only a configured timeout, closes the socket, and ignores a late result", async () => {
+    vi.useFakeTimers();
+    try {
+      const onError = vi.fn();
+      const onSuccess = vi.fn();
+      const client = new LivenessClient(
+        { apiUrl: "http://localhost:8000", targetFps: 200, timeoutMs: 5_000 },
+        { onError, onSuccess },
+      );
+      const promise = client.start();
+      const assertion = expect(promise).rejects.toMatchObject({ code: "timeout" });
+
+      await flush();
+      const ws = MockWebSocket.instances[0];
+      ws._open();
+      ws._msg({ type: "ready", required_frames: REQUIRED });
+      // Capture must finish inside the 5 s deadline — pump rather than guess.
+      await advanceUntil(() => binaryFrames(ws).length === REQUIRED);
+      expect(binaryFrames(ws).length).toBe(REQUIRED);
+
+      // The explicitly configured 5 s deadline expires and must fire.
+      await vi.advanceTimersByTimeAsync(5_000);
+      await assertion;
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0][0]).toMatchObject({ code: "timeout" });
+      expect(ws.readyState).toBe(3); // teardown closed the socket
+
+      // A verdict that arrives after the deadline must not resurrect the run.
+      ws._msg(RESULT_MSG);
+      expect(onSuccess).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports code, reason and cleanliness when the server fails the connection", async () => {
+    const onError = vi.fn();
+    const client = new LivenessClient({ apiUrl: "http://localhost:8000" }, { onError });
+    const promise = client.start();
+    const assertion = expect(promise).rejects.toMatchObject({ code: "connection-failed" });
+
+    await waitFor(() => MockWebSocket.instances.length > 0);
+    const ws = MockWebSocket.instances[0];
+    ws._open();
+    ws._msg({ type: "ready", required_frames: REQUIRED });
+
+    // Production, verbatim: websockets' own keepalive ping timeout.
+    ws._serverClose(1011, "keepalive ping timeout", true);
+    await assertion;
+
+    const err = onError.mock.calls[0][0];
+    expect(err.code).toBe("connection-failed");
+    expect(err.message).toContain("code=1011");
+    expect(err.message).toContain("reason=keepalive ping timeout");
+    expect(err.message).toContain("wasClean=true");
+    expect(err.message).toMatch(/elapsedMs=\d+/);
+    expect(err.detail).toContain("code=1011");
+    // The generic user-facing sentence must still lead the message.
+    expect(err.message).toContain("Connection closed unexpectedly");
+  });
+
+  it("surfaces an abnormal network drop as clearly as a server-side close", async () => {
+    const onError = vi.fn();
+    const client = new LivenessClient({ apiUrl: "http://localhost:8000" }, { onError });
+    const promise = client.start();
+    const assertion = expect(promise).rejects.toMatchObject({ code: "connection-failed" });
+
+    await waitFor(() => MockWebSocket.instances.length > 0);
+    const ws = MockWebSocket.instances[0];
+    ws._open();
+    ws._msg({ type: "ready", required_frames: REQUIRED });
+
+    ws._serverClose(1006, "", false); // TCP drop: no close frame, no reason
+    await assertion;
+
+    const err = onError.mock.calls[0][0];
+    expect(err.message).toContain("code=1006");
+    expect(err.message).toContain("reason=none");
+    expect(err.message).toContain("wasClean=false");
+  });
+
+  it("stays in processing while server keepalive progress frames arrive", async () => {
+    const onProgress = vi.fn();
+    const client = new LivenessClient(
+      { apiUrl: "http://localhost:8000", targetFps: 200 },
+      { onProgress },
+    );
+    const promise = client.start();
+
+    await waitFor(() => MockWebSocket.instances.length > 0);
+    const ws = MockWebSocket.instances[0];
+    ws._open();
+    ws._msg({ type: "ready", required_frames: REQUIRED });
+    await waitFor(() => binaryFrames(ws).length === REQUIRED, 5000);
+
+    ws._msg({ type: "processing", received: REQUIRED });
+    // Two keepalives, 5 s apart — what the server emits during inference.
+    ws._msg({ type: "progress", stage: "inferring", elapsed_ms: 5_000 });
+    expect(client.getPhase()).toBe("processing");
+    ws._msg({ type: "progress", stage: "inferring", elapsed_ms: 10_000 });
+    expect(client.getPhase()).toBe("processing");
+
+    const keepalives = onProgress.mock.calls.filter(
+      (call) => call[0].message === "Analyzing your video…",
+    );
+    expect(keepalives.length).toBeGreaterThanOrEqual(2);
+
+    // Keepalives are not terminal: the run only settles on the verdict.
+    ws._msg(RESULT_MSG);
+    const result = await promise;
+    expect(result.prediction).toBe("live");
   });
 });
 
