@@ -37,8 +37,28 @@ GET /ws/sessions/{session_id}?token={ws_token}
 ```
 
 - Wrong token → close `4401`
+- Missing `?token=` → close `4401`
 - Unknown/expired session → close `4404`
 - Session already consumed → close `4409`
+
+Because every refusal above is sent **before** `accept()`, the ASGI server
+answers the upgrade request itself with `HTTP/1.1 403 Forbidden`. The close
+codes are therefore never visible to a client — the browser reports only
+`WebSocket connection … failed` and Render logs only `403`. The reason is
+recoverable from the API's own log line instead:
+
+```
+WARNING liveness ws_rejected session=hR8k2Fq1 reason=token_invalid close_code=4401
+INFO    liveness ws_accepted session=hR8k2Fq1
+```
+
+`reason` is one of `token_missing`, `token_invalid`,
+`session_not_found_or_expired`, `invalid_state:<state>`. Only an 8-character
+session prefix is logged, and the token is never logged at all.
+
+`Origin` is **not** an authorisation input on this route: Starlette's CORS
+middleware inspects `http` scopes only and never sees a WebSocket, and the
+handshake is authorised by the per-session `ws_token`.
 
 On accept the server sends exactly one greeting:
 

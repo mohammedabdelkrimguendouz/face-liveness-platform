@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
+from starlette.websockets import WebSocketDisconnect
 
 SEQ = struct.Struct(">I")
 REQUIRED = 150
@@ -233,3 +235,141 @@ def test_control_json_must_be_valid(fastapi_client):
         msg = ws.receive_json()
     assert msg["type"] == "error"
     assert msg["error"] == "bad_message"
+
+
+# ---------------------------------------------------------------------------
+# Handshake acceptance / rejection (the production `403 Forbidden` regression)
+#
+# A close() sent before accept() makes the ASGI server answer the upgrade
+# with HTTP 403, so every rejection below is indistinguishable from the
+# outside - the route logs a structured reason so Render's logs can tell
+# them apart.
+#
+# Origin is deliberately NOT one of the gates. Starlette's CORSMiddleware
+# only inspects `http` scopes and never sees a WebSocket, and the handshake
+# is authorised by the per-session capability token instead: a third-party
+# page can mint its own session but can never read another origin's
+# `ws_token`, because reading that response is precisely what CORS blocks
+# on POST /sessions. The tests below pin that contract down from both
+# directions.
+# ---------------------------------------------------------------------------
+PRODUCTION_ORIGIN = "https://face-liveness-platform.vercel.app"
+
+
+def test_handshake_accepted_for_valid_session_from_production_origin(fastapi_client):
+    _install_stub(fastapi_client)
+    sid, token = _session(fastapi_client)
+    with fastapi_client.websocket_connect(
+        f"/ws/sessions/{sid}?token={token}", headers={"origin": PRODUCTION_ORIGIN}
+    ) as ws:
+        ready = ws.receive_json()
+    assert ready["type"] == "ready"
+    assert ready["session_id"] == sid
+
+
+def test_handshake_accepted_with_no_origin_header(fastapi_client):
+    """Local development and non-browser clients send no Origin at all."""
+    _install_stub(fastapi_client)
+    sid, token = _session(fastapi_client)
+    with fastapi_client.websocket_connect(f"/ws/sessions/{sid}?token={token}") as ws:
+        ready = ws.receive_json()
+    assert ready["type"] == "ready"
+
+
+def test_handshake_accepted_from_arbitrary_origin_with_valid_token(fastapi_client):
+    """Origin is not a gate; the capability token is."""
+    _install_stub(fastapi_client)
+    sid, token = _session(fastapi_client)
+    with fastapi_client.websocket_connect(
+        f"/ws/sessions/{sid}?token={token}", headers={"origin": "https://evil.example"}
+    ) as ws:
+        ready = ws.receive_json()
+    assert ready["type"] == "ready"
+
+
+def test_handshake_rejected_when_token_query_is_absent(fastapi_client):
+    """The exact request the SDK issued before it appended `?token=`.
+
+    A required query parameter failed FastAPI's dependency validation before
+    the route ever ran, which is why production only ever showed uvicorn's
+    bare `403 Forbidden` with no diagnostic of its own.
+    """
+    sid, _ = _session(fastapi_client)
+    with pytest.raises(WebSocketDisconnect):
+        with fastapi_client.websocket_connect(f"/ws/sessions/{sid}") as ws:
+            ws.receive_json()
+
+
+def test_handshake_rejected_for_empty_token(fastapi_client):
+    sid, _ = _session(fastapi_client)
+    with pytest.raises(WebSocketDisconnect):
+        with fastapi_client.websocket_connect(f"/ws/sessions/{sid}?token=") as ws:
+            ws.receive_json()
+
+
+def test_handshake_rejected_for_wrong_token(fastapi_client):
+    sid, _ = _session(fastapi_client)
+    with pytest.raises(WebSocketDisconnect):
+        with fastapi_client.websocket_connect(f"/ws/sessions/{sid}?token=wrong") as ws:
+            ws.receive_json()
+
+
+def test_handshake_rejected_for_unknown_session(fastapi_client):
+    with pytest.raises(WebSocketDisconnect):
+        with fastapi_client.websocket_connect(
+            "/ws/sessions/definitely-not-a-session?token=x"
+        ) as ws:
+            ws.receive_json()
+
+
+def test_handshake_rejected_for_unknown_session_from_production_origin(fastapi_client):
+    """A well-formed Origin grants nothing on its own."""
+    with pytest.raises(WebSocketDisconnect):
+        with fastapi_client.websocket_connect(
+            "/ws/sessions/definitely-not-a-session?token=x",
+            headers={"origin": PRODUCTION_ORIGIN},
+        ) as ws:
+            ws.receive_json()
+
+
+def test_handshake_rejection_logs_reason_without_secrets(
+    fastapi_client, caplog
+):
+    """Rejections must be diagnosable in production logs, leak-free.
+
+    The token must never appear - neither as a value nor as part of the
+    message - and the session id must be truncated, matching the rest of the
+    module's logging.
+    """
+    sid, token = _session(fastapi_client)
+
+    with caplog.at_level("WARNING", logger="liveness"):
+        with pytest.raises(WebSocketDisconnect):
+            with fastapi_client.websocket_connect(
+                f"/ws/sessions/{sid}?token={token[:-3]}"
+            ) as ws:
+                ws.receive_json()
+
+    rejection = [r for r in caplog.records if "ws_rejected" in r.getMessage()]
+    assert rejection, "handshake rejection must emit a structured ws_rejected record"
+    message = rejection[-1].getMessage()
+    assert "reason=token_invalid" in message
+    assert f"close_code=4401" in message
+    assert token not in message, "capability token leaked into logs"
+    assert sid not in message, "full session id leaked into logs"
+    assert sid[:8] in message, "session prefix missing, so logs cannot be correlated"
+
+
+def test_handshake_acceptance_is_logged(fastapi_client, caplog):
+    _install_stub(fastapi_client)
+    sid, token = _session(fastapi_client)
+
+    with caplog.at_level("INFO", logger="liveness"):
+        with fastapi_client.websocket_connect(f"/ws/sessions/{sid}?token={token}") as ws:
+            ws.receive_json()
+
+    accepted = [r for r in caplog.records if "ws_accepted" in r.getMessage()]
+    assert accepted, "accepted handshake must be logged"
+    message = accepted[-1].getMessage()
+    assert token not in message
+    assert sid not in message

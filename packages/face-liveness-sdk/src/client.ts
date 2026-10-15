@@ -220,7 +220,7 @@ export class LivenessClient {
       // Let cancel() settle this promise.
       this.pendingReject = fail;
 
-      const ws = new WebSocket(session.wsUrl);
+      const ws = new WebSocket(withWsToken(session.wsUrl, session.wsToken));
       ws.binaryType = "arraybuffer";
       this.ws = ws;
 
@@ -449,4 +449,23 @@ function absoluteWsUrl(apiBase: string, wsUrl: string): string {
   } catch {
     return wsUrl;
   }
+}
+
+/**
+ * Append the session capability token to the WebSocket URL.
+ *
+ * The backend requires it as a query parameter
+ * (`GET /ws/sessions/{id}?token={ws_token}` — see docs/protocol.md). The
+ * token is a required query parameter on that route, so omitting it makes
+ * FastAPI reject the handshake before `accept()`, and the ASGI server then
+ * answers the upgrade with `HTTP 403 Forbidden` — the connection never
+ * reaches the WebSocket handler at all.
+ *
+ * The token is a `token_urlsafe()` capability string, so it is percent-encoded
+ * to stay valid in a query value regardless of how it is generated.
+ */
+function withWsToken(wsUrl: string, token: string): string {
+  if (!token) return wsUrl;
+  const separator = wsUrl.includes("?") ? "&" : "?";
+  return `${wsUrl}${separator}token=${encodeURIComponent(token)}`;
 }

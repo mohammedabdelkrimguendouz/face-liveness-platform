@@ -19,6 +19,32 @@ curl https://your-api/ready
 `/health` only reports the process is alive — always check `/ready` for model
 state.
 
+### WebSocket fails as `403 Forbidden` (handshake rejected)
+
+The browser console shows only:
+
+```
+WebSocket connection to 'wss://…/ws/sessions/<id>' failed:
+```
+
+with no code, and Render logs `INFO: "WebSocket /ws/sessions/…" 403` followed by
+`INFO: connection rejected (403 Forbidden)`.
+
+That 403 is produced **before** the socket is accepted — it is *not* an
+application-level close, so none of the `44xx` codes below ever reach the
+client. Look for the API's own diagnostic line in the same logs:
+
+| Log line | Cause | Fix |
+|----------|-------|-----|
+| `reason=token_missing close_code=4401` | `?token=` absent from the URL | Client must send `GET /ws/sessions/{id}?token={ws_token}` (`docs/protocol.md` §2). |
+| `reason=token_invalid close_code=4401` | Wrong `ws_token` | Use the token from the `POST /sessions` response for *that* session. |
+| `reason=session_not_found_or_expired close_code=4404` | Unknown, expired (300 s) or already-consumed id | Create a new session; a session is destroyed when its socket disconnects. |
+| `reason=invalid_state:… close_code=4409` | Session already consumed | Create a new session. |
+
+If `ws_rejected` is **absent** and only uvicorn's bare `403` appears, the
+request never reached the route — check the proxy path and that the URL is
+`wss://` (not `ws://`) when the page is served over HTTPS.
+
 ### WebSocket closes immediately
 
 | Close code | Meaning |

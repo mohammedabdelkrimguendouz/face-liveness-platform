@@ -136,6 +136,77 @@ afterEach(() => {
 // Tests
 // ---------------------------------------------------------------------------
 describe("LivenessClient", () => {
+  /**
+   * Starts a verification, captures the URL the WebSocket was opened with, then
+   * aborts so the pending promise never leaks into the next test.
+   *
+   * `session` overrides the `POST /sessions` body, which is the only input the
+   * SDK controls the handshake URL from (it returns `ws_url` as a path).
+   */
+  async function captureWsUrl(
+    apiUrl: string,
+    session: Record<string, unknown> = {},
+  ): Promise<string> {
+    (globalThis as any).fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: async () => ({
+        session_id: "sess123",
+        ws_url: "/ws/sessions/sess123",
+        ws_token: "tok123",
+        num_frames: REQUIRED,
+        max_frame_bytes: 2 * 1024 * 1024,
+        ...session,
+      }),
+    });
+
+    const client = new LivenessClient({ apiUrl, targetFps: 200 });
+    const promise = client.start();
+
+    await waitFor(() => MockWebSocket.instances.length > 0);
+    const ws = MockWebSocket.instances[0];
+    const { url } = ws;
+
+    ws._open();
+    ws._msg({ type: "ready", required_frames: REQUIRED });
+    await waitFor(() => binaryFrames(ws).length > 0);
+
+    client.cancel();
+    await expect(promise).rejects.toMatchObject({ code: "cancelled" });
+    return url;
+  }
+
+  it("resolves the relative ws_url against the configured API host and appends the session token", async () => {
+    const url = await captureWsUrl("https://face-liveness-api-892k.onrender.com");
+
+    // Regression: without `?token=` the backend refuses the upgrade before
+    // accept() and the ASGI server answers `HTTP 403 Forbidden`, so the
+    // connection never reaches the WebSocket handler.
+    expect(url).toBe(
+      "wss://face-liveness-api-892k.onrender.com/ws/sessions/sess123?token=tok123",
+    );
+  });
+
+  it("keeps local development on ws://localhost:8000", async () => {
+    const url = await captureWsUrl("http://localhost:8000");
+    expect(url).toBe("ws://localhost:8000/ws/sessions/sess123?token=tok123");
+  });
+
+  it("percent-encodes the session token in the query string", async () => {
+    const url = await captureWsUrl("https://api.example.com", {
+      ws_token: "ab/cd+ef==",
+    });
+    expect(url).toBe("wss://api.example.com/ws/sessions/sess123?token=ab%2Fcd%2Bef%3D%3D");
+  });
+
+  it("never puts the session token in the URL's path or fragment", async () => {
+    const url = await captureWsUrl("https://api.example.com", { ws_token: "sekrit" });
+    const parsed = new URL(url);
+    expect(parsed.pathname).toBe("/ws/sessions/sess123");
+    expect(parsed.searchParams.get("token")).toBe("sekrit");
+    expect(parsed.hash).toBe("");
+  });
+
   it("creates a session and streams frames in order, then resolves the result", async () => {
     const onProgress = vi.fn();
     const client = new LivenessClient({ apiUrl: "http://localhost:8000", targetFps: 200 }, { onProgress });

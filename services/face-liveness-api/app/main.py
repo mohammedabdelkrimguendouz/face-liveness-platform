@@ -216,22 +216,58 @@ async def _send(ws: WebSocket, payload: Dict[str, object]) -> None:
         logger.debug("Failed to send WS payload", exc_info=True)
 
 
+async def _reject(ws: WebSocket, session_id: str, reason: str, code: int) -> None:
+    """Refuse a handshake before ``accept()`` and record why.
+
+    Closing a WebSocket that was never accepted makes the ASGI server answer
+    the upgrade request with ``HTTP 403 Forbidden``, which is the only thing a
+    proxy/load-balancer can see for a failed handshake — so without this log
+    the rejection reason is invisible in production.
+
+    ``session_id`` is truncated to the same 8-character prefix used elsewhere
+    so a line can be correlated with the uvicorn access log without emitting
+    a full identifier. The capability token is never logged, by value or by
+    length.
+    """
+    logger.warning(
+        "ws_rejected session=%s reason=%s close_code=%d",
+        session_id[:8],
+        reason,
+        code,
+    )
+    await ws.close(code=code)
+
+
 @app.websocket("/ws/sessions/{session_id}")
-async def session_socket(ws: WebSocket, session_id: str, token: str = Query(...)) -> None:
+async def session_socket(
+    ws: WebSocket,
+    session_id: str,
+    # Optional rather than Query(...): a required query parameter fails
+    # FastAPI's dependency validation before this function runs, so the
+    # rejection would bypass _reject() and leave no diagnostic. Validating
+    # here instead keeps every refusal path (and its log) in one place while
+    # still closing before accept().
+    token: Optional[str] = Query(default=None),
+) -> None:
     try:
         session = SESSIONS.get(session_id)
     except SessionError:
-        await ws.close(code=4404)
+        await _reject(ws, session_id, "session_not_found_or_expired", 4404)
+        return
+
+    if not token:
+        await _reject(ws, session_id, "token_missing", 4401)
         return
 
     if token != session.ws_token:
-        await ws.close(code=4401)
+        await _reject(ws, session_id, "token_invalid", 4401)
         return
 
     if session.state not in (SessionState.CREATED, SessionState.STREAMING):
-        await ws.close(code=4409)
+        await _reject(ws, session_id, f"invalid_state:{session.state.value}", 4409)
         return
 
+    logger.info("ws_accepted session=%s", session_id[:8])
     await ws.accept()
     session.state = SessionState.STREAMING
     await _send(ws, {
