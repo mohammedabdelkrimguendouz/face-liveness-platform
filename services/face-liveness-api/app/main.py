@@ -208,12 +208,26 @@ def _ws_path(session_id: str) -> str:
     return f"/ws/sessions/{session_id}"
 
 
-async def _send(ws: WebSocket, payload: Dict[str, object]) -> None:
+async def _send(ws: WebSocket, payload: Dict[str, object]) -> bool:
+    """Send one JSON control frame. Returns True if it reached the transport.
+
+    Failures are logged at WARNING with a traceback. An earlier revision
+    logged them at DEBUG, which made a dropped final result completely
+    invisible at the default ``LOG_LEVEL=info`` — the client would then report
+    only "Connection closed (code N)" and the server log would show nothing
+    between the inference line and the disconnect.
+
+    Only the message ``type`` is logged: payloads may carry session ids and
+    model scores, and never tokens or frame data.
+    """
     import json
+    message_type = payload.get("type", "?") if isinstance(payload, dict) else "?"
     try:
         await ws.send_text(json.dumps(payload))
-    except Exception:  # noqa: BLE001 - client likely gone
-        logger.debug("Failed to send WS payload", exc_info=True)
+        return True
+    except Exception:  # noqa: BLE001 - most often a client that already left
+        logger.warning("ws_send_failed type=%s", message_type, exc_info=True)
+        return False
 
 
 async def _reject(ws: WebSocket, session_id: str, reason: str, code: int) -> None:
@@ -302,9 +316,13 @@ async def session_socket(
                 break
 
     except WebSocketDisconnect:
-        logger.info("Client disconnected from session %s", session_id[:8])
+        logger.info("client_disconnected session=%s state=%s", session_id[:8], session.state.value)
     except Exception:  # noqa: BLE001
-        logger.exception("WebSocket error for session %s", session_id[:8])
+        # The traceback is essential here. If an exception escapes this
+        # handler, the websockets layer answers the client with close code
+        # 1011 and logs only "connection handler failed" — without this
+        # record the server log cannot explain the client's failure.
+        logger.exception("websocket_error session=%s", session_id[:8])
         await _send(ws, {"type": "error", "error": "internal_error", "message": "Unexpected server error"})
     finally:
         # Always release buffered frames unless we are still inferring.
@@ -313,6 +331,14 @@ async def session_socket(
             if session.state != SessionState.CANCELLED:
                 session.state = SessionState.CANCELLED
             SESSIONS.remove(session.session_id)
+        # Exactly one of these per connection, on every terminal path:
+        # success, model error, cancellation, client disconnect or crash.
+        logger.info(
+            "session_finalized session=%s state=%s delivered=%s",
+            session_id[:8],
+            session.state.value,
+            session.result_delivered,
+        )
 
 
 async def _handle_control(ws: WebSocket, session, raw: str) -> None:
@@ -422,7 +448,20 @@ async def _run_inference(ws: WebSocket, session) -> None:
         return
 
     session.state = SessionState.COMPLETED
-    await _send(ws, {
+    logger.info(
+        "inference_completed session=%s prediction=%s score=%.6f frames=%d ms=%.1f",
+        session.session_id[:8],
+        result.prediction,
+        result.anomaly_score,
+        result.frames_processed,
+        result.inference_ms,
+    )
+
+    # A `spoof` prediction is a valid model answer, not a transport failure.
+    # The two must be distinguishable in the logs, so the send is reported
+    # separately from the inference that preceded it.
+    logger.info("result_send_started session=%s", session.session_id[:8])
+    delivered = await _send(ws, {
         "type": "result",
         "session_id": session.session_id,
         "prediction": result.prediction,
@@ -433,5 +472,17 @@ async def _run_inference(ws: WebSocket, session) -> None:
         "inference_ms": round(result.inference_ms, 1),
         "score_semantics": "anomaly_score = 1 - exp(-MSE); not a calibrated probability",
     })
-    # Release the buffer immediately after the result is delivered.
+
+    if delivered:
+        logger.info("result_send_succeeded session=%s", session.session_id[:8])
+    else:
+        # The model already answered; only the delivery failed. Reporting this
+        # separately is what lets an operator tell "retry the request" apart
+        # from "the model is broken".
+        logger.warning(
+            "result_send_failed session=%s stage=after_inference", session.session_id[:8]
+        )
+
+    # Release the buffer once the result has been handed to the transport.
     session.frames.clear()
+    session.result_delivered = delivered

@@ -8,6 +8,8 @@ separately in ``test_inference.py`` (marked ``real``).
 
 from __future__ import annotations
 
+import asyncio
+import json
 import struct
 from types import SimpleNamespace
 
@@ -373,3 +375,206 @@ def test_handshake_acceptance_is_logged(fastapi_client, caplog):
     message = accepted[-1].getMessage()
     assert token not in message
     assert sid not in message
+
+
+# ---------------------------------------------------------------------------
+# Post-inference lifecycle: delivery, serialization, finalization
+#
+# Inference finishing is NOT the same as the client receiving the answer. A
+# result that fails to leave the server used to be logged at DEBUG and then
+# swallowed, so production showed only `Inference done` followed by the
+# client's bare "Connection closed (code 1011)". These tests pin the two
+# stages apart.
+# ---------------------------------------------------------------------------
+class _CapturingWS:
+    """Transport stand-in recording exactly what the server tried to send.
+
+    `fail_after=N` lets the first N frames through and then raises, which is
+    how a real socket behaves when the client (or a proxy) disappears while
+    inference is still running.
+    """
+
+    def __init__(self, fail_after: int | None = None):
+        self.fail_after = fail_after
+        self.sent: list[str] = []
+
+    async def send_text(self, text: str) -> None:
+        if self.fail_after is not None and len(self.sent) >= self.fail_after:
+            raise RuntimeError("send on closed connection")
+        self.sent.append(text)
+
+
+def _populated_session(fastapi_client, prediction="live", score=0.05):
+    """A real Session already holding `REQUIRED` frames, ready to infer."""
+    _install_stub(fastapi_client, prediction=prediction, score=score)
+    from app import main
+
+    sid, _ = _session(fastapi_client)
+    session = main.SESSIONS.get(sid)
+    session.frames.clear()
+    # The stub pipeline never decodes, so arbitrary bytes stand in for JPEGs.
+    for i in range(REQUIRED):
+        session.frames[i] = b"\xff\xd8\xff\xe0"
+    return session
+
+
+def _infer_with(ws, session):
+    """Run _run_inference on its own loop with a loop-local semaphore."""
+    from app import main
+
+    original = main.INFER_SEMAPHORE
+
+    async def run():
+        # A fresh semaphore, because asyncio primitives are bound to the loop
+        # that first awaits them and the app's own loop belongs to TestClient.
+        main.INFER_SEMAPHORE = asyncio.Semaphore(1)
+        await main._run_inference(ws, session)
+
+    try:
+        asyncio.run(run())
+    finally:
+        main.INFER_SEMAPHORE = original
+
+
+def test_result_payload_is_strict_json_with_every_sdk_field(fastapi_client):
+    """The exact bytes sent must be strict JSON the browser can JSON.parse.
+
+    `allow_nan=False` matters: json.dumps would otherwise emit a bare `NaN`
+    literal, which Python accepts but `JSON.parse` rejects — the SDK would
+    then silently drop the message and report only a socket close.
+    """
+    session = _populated_session(fastapi_client, prediction="spoof", score=0.9925)
+    ws = _CapturingWS()
+    _infer_with(ws, session)
+
+    # `processing` is sent before inference, `result` after it.
+    assert len(ws.sent) == 2, f"expected processing + result, got {ws.sent}"
+    assert json.loads(ws.sent[0])["type"] == "processing"
+
+    wire = ws.sent[1]
+    json.dumps(wire, allow_nan=False)  # strict, no NaN/Infinity literals
+
+    msg = json.loads(wire)
+    assert msg["type"] == "result"
+    assert msg["prediction"] == "spoof", "a spoof verdict must be reported, never hidden"
+    for field in ("session_id", "anomaly_score", "reconstruction_error", "threshold",
+                  "frames_processed", "inference_ms", "score_semantics"):
+        assert field in msg, f"SDK reads msg.{field}"
+    assert msg["frames_processed"] == REQUIRED
+    assert isinstance(msg["anomaly_score"], float)
+    assert isinstance(msg["threshold"], float)
+
+
+def test_successful_inference_marks_session_delivered(fastapi_client):
+    session = _populated_session(fastapi_client, prediction="spoof", score=0.99)
+    ws = _CapturingWS()
+    _infer_with(ws, session)
+
+    assert session.state.value == "completed"
+    assert session.result_delivered is True
+    assert session.frames == {}, "frame buffer must be released after delivery"
+
+
+def test_successful_inference_with_dead_transport_reports_delivery_failure(
+    fastapi_client, caplog
+):
+    """Inference succeeded; only the send failed. The two must not be merged.
+
+    This is the case that previously vanished into a DEBUG log: the model had
+    already answered, but the operator could only see `Inference done` plus a
+    client-side socket close.
+    """
+    session = _populated_session(fastapi_client, prediction="spoof", score=0.99)
+    # `processing` goes out, then the client vanishes while the model works,
+    # so only the result send fails.
+    ws = _CapturingWS(fail_after=1)
+
+    with caplog.at_level("INFO", logger="liveness"):
+        _infer_with(ws, session)
+
+    messages = [r.getMessage() for r in caplog.records]
+
+    completed = [m for m in messages if m.startswith("inference_completed")]
+    assert completed, "the model finished and must be reported as such"
+    assert "prediction=spoof" in completed[0]
+
+    assert any(m.startswith("result_send_started") for m in messages)
+    assert any(m.startswith("result_send_succeeded") for m in messages) is False
+
+    failed = [m for m in messages if m.startswith("result_send_failed")]
+    assert failed, "a failed delivery must be visible at the default log level"
+    assert "stage=after_inference" in failed[0]
+    assert session.result_delivered is False, "state must record the undelivered result"
+    assert session.state.value == "completed", "the model still answered; state stays completed"
+    assert session.frames == {}, "frames are released either way"
+
+
+def test_send_failure_logs_a_warning_with_traceback(fastapi_client):
+    """Delivery failures must not be swallowed at DEBUG."""
+    import logging
+
+    from app import main
+
+    class _ExplodingWS:
+        async def send_text(self, text: str) -> None:
+            raise RuntimeError("send on closed connection")
+
+    records = []
+    handler = type("H", (logging.Handler,), {"emit": lambda self, r: records.append(r)})()
+    main.logger.addHandler(handler)
+    main.logger.setLevel(logging.DEBUG)
+    try:
+        delivered = asyncio.run(main._send(_ExplodingWS(), {"type": "result", "session_id": "abc"}))
+    finally:
+        main.logger.removeHandler(handler)
+
+    assert delivered is False
+    warnings = [r for r in records if r.levelno == logging.WARNING]
+    assert warnings, "a failed send must surface as WARNING, not DEBUG"
+    assert warnings[-1].exc_info is not None, "the traceback is the only way to diagnose this"
+    assert "ws_send_failed" in warnings[-1].getMessage()
+
+
+def test_session_finalized_logged_with_delivery_flag(fastapi_client, caplog):
+    _install_stub(fastapi_client)
+    sid, token = _session(fastapi_client)
+
+    with caplog.at_level("INFO", logger="liveness"):
+        with fastapi_client.websocket_connect(f"/ws/sessions/{sid}?token={token}") as ws:
+            ready = ws.receive_json()
+            assert ready["type"] == "ready"
+            for i in range(REQUIRED):
+                ws.send_bytes(_frame(i))
+            msg = ws.receive_json()
+            while msg.get("type") != "result":
+                msg = ws.receive_json()
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("result_send_started") for m in messages)
+    assert any(m.startswith("result_send_succeeded") for m in messages)
+
+    finalized = [m for m in messages if m.startswith("session_finalized")]
+    assert finalized, "every terminal path must emit exactly one session_finalized"
+    assert "delivered=True" in finalized[0]
+    assert "state=completed" in finalized[0]
+    assert token not in finalized[0]
+
+
+def test_session_finalized_reported_when_client_leaves_early(fastapi_client, caplog):
+    """An abandoned stream is still finalized, with delivered=False."""
+    _install_stub(fastapi_client)
+    sid, token = _session(fastapi_client)
+
+    with caplog.at_level("INFO", logger="liveness"):
+        with fastapi_client.websocket_connect(f"/ws/sessions/{sid}?token={token}") as ws:
+            ws.receive_json()
+            for i in range(5):
+                ws.send_bytes(_frame(i))
+            # Client walks away mid-stream; no `complete`, no result.
+
+    messages = [r.getMessage() for r in caplog.records]
+    finalized = [m for m in messages if m.startswith("session_finalized")]
+    assert finalized, "an abandoned session must still be finalized"
+    assert "delivered=False" in finalized[0]
+    assert "state=cancelled" in finalized[0]
+    assert token not in finalized[0]

@@ -45,6 +45,31 @@ If `ws_rejected` is **absent** and only uvicorn's bare `403` appears, the
 request never reached the route — check the proxy path and that the URL is
 `wss://` (not `ws://`) when the page is served over HTTPS.
 
+### Verification fails after `Inference done` (close code 1011)
+
+The model answered — `app.ml.pipeline Inference done: score=… pred=…` proves
+it — but the browser reported `Verification failed / Connection closed (code
+1011)`.
+
+A successful inference and a delivered result are **different events**. Read
+the four stage lines that follow `Inference done`, all tagged with the same
+8-character session prefix:
+
+| Log line | Meaning |
+|----------|---------|
+| `inference_completed session=… prediction=… score=… ms=…` | The model answered. `prediction=spoof` here is a valid verdict, not a fault. |
+| `result_send_started session=…` | The server began handing the result to the transport. |
+| `result_send_succeeded session=…` | It reached the socket. If the client still failed, the problem is downstream of the API. |
+| `result_send_failed session=… stage=after_inference` | **Inference was fine; delivery was not.** Usually the client or a proxy dropped the connection during the (tens-of-seconds) inference window. |
+| `session_finalized session=… state=… delivered=…` | Exactly one per connection. `delivered=False` confirms the answer never left the server. |
+| `websocket_error session=…` | An uncaught exception, with traceback. An exception that escapes the handler is what makes `websockets` answer the client with close code **1011**. |
+
+If the browser reports **1011**, the server log must contain one of
+`websocket_error`, `connection handler failed` or `data transfer failed`,
+all with a full traceback. `result_send_failed` with **no** accompanying
+`websocket_error` means the client went away first — check proxy idle
+timeouts and the `LIVENESS_SESSION_TTL` for long inference windows.
+
 ### WebSocket closes immediately
 
 | Close code | Meaning |

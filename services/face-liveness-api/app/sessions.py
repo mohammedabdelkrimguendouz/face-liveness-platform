@@ -49,6 +49,10 @@ class Session:
     error: Optional[SessionError] = None
     # Guard against a second concurrent inference for the same session.
     inference_started: bool = False
+    # True only once the final `result` frame has reached the transport.
+    # Kept separately from `state` so a successful inference whose result
+    # never left the server is still visible as a delivery failure.
+    result_delivered: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
