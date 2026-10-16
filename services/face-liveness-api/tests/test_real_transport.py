@@ -180,16 +180,36 @@ def _frame(index: int) -> bytes:
     return SEQ.pack(index) + b"\xff\xd8\xff\xe0stub"
 
 
-async def _wait_for_log(marker: str, caplog, timeout: float) -> str:
-    """Block until a `liveness` record containing `marker` appears."""
+def _wait_for_log(marker: str, caplog, timeout: float) -> str:
+    """Block until a `liveness` record containing `marker` appears.
+
+    Deliberately synchronous: every caller runs inside a sync test function
+    (the server logs from its own thread, so there is nothing to await here —
+    an ``async def`` version was silently returning an un-awaited coroutine
+    and the callers then failed with ``argument of type 'coroutine'``).
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         for record in caplog.records:
             message = record.getMessage()
             if marker in message:
                 return message
-        await asyncio.sleep(0.05)
+        time.sleep(0.05)
     raise AssertionError(f"log line containing {marker!r} did not arrive within {timeout}s")
+
+
+@pytest.fixture(autouse=True)
+def _liveness_info_reach_caplog(caplog):
+    """Make `liveness` INFO records visible to caplog in every test here.
+
+    Under pytest the root logger is WARNING (pytest has already installed its
+    handlers, so the app's ``logging.basicConfig(level=INFO)`` is a no-op) and
+    the `liveness` logger inherits it — ``logger.info(...)`` is then dropped at
+    the source and caplog sees nothing, which made assertions on lines like
+    ``result_send_succeeded`` fail even though the server had logged them.
+    """
+    with caplog.at_level(logging.INFO, logger="liveness"):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +339,14 @@ def test_real_transport_fast_inference_delivers_the_result(caplog):
             received: list[dict] = []
             started = time.perf_counter()
             async with websockets.connect(uri, open_timeout=10) as ws:
+                # One reader at a time: `websockets` forbids two concurrent
+                # recv() calls. Starting the pump before `ready` was read made
+                # the winner depend on whether `ready` was already buffered —
+                # the loser raised ConcurrencyError and the test flaked.
+                ready = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                assert ready["type"] == "ready"
+                assert ready["required_frames"] == REQUIRED
+
                 async def pump_until_result():
                     while True:
                         msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
@@ -327,11 +355,6 @@ def test_real_transport_fast_inference_delivers_the_result(caplog):
                             return
 
                 pump = asyncio.create_task(pump_until_result())
-                ready = await asyncio.wait_for(ws.recv(), timeout=10)
-                ready_msg = json.loads(ready)
-                assert ready_msg["type"] == "ready"
-                assert ready_msg["required_frames"] == REQUIRED
-
                 for i in range(REQUIRED):
                     await ws.send(_frame(i))
                 await ws.send(json.dumps({"type": "complete"}))
@@ -340,6 +363,8 @@ def test_real_transport_fast_inference_delivers_the_result(caplog):
                 return received, time.perf_counter() - started
 
         received, elapsed = asyncio.run(scenario())
+        # Wait for the server-side log while the server is still running.
+        delivered_log = _wait_for_log("result_send_succeeded", caplog, timeout=10)
 
     kinds = [m["type"] for m in received]
     assert "processing" in kinds
@@ -348,9 +373,7 @@ def test_real_transport_fast_inference_delivers_the_result(caplog):
     assert result[0]["prediction"] == "spoof"
     assert result[0]["frames_processed"] == REQUIRED
     assert elapsed < 15, f"fast inference took {elapsed:.1f}s"
-
-    messages = [r.getMessage() for r in caplog.records]
-    assert any(m.startswith("result_send_succeeded") for m in messages)
+    assert delivered_log.startswith("result_send_succeeded")
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +420,7 @@ def test_real_transport_46s_inference_delivers_while_client_sends_nothing(caplog
             return events, closed, time.perf_counter() - started
 
         events, closed, elapsed = asyncio.run(scenario())
+        delivered_log = _wait_for_log("result_send_succeeded", caplog, timeout=10)
 
     assert closed is None, f"connection died mid-inference: {closed}"
     kinds = [m["type"] for _, m in events]
@@ -413,8 +437,7 @@ def test_real_transport_46s_inference_delivers_while_client_sends_nothing(caplog
     print(f"[2] long inference: delivered after {elapsed:.1f}s, "
           f"{len(progress_times)} keepalives, no close event")
 
-    messages = [r.getMessage() for r in caplog.records]
-    assert any(m.startswith("result_send_succeeded") for m in messages)
+    assert delivered_log.startswith("result_send_succeeded")
 
 
 # ---------------------------------------------------------------------------
@@ -456,12 +479,18 @@ def test_real_transport_client_disconnect_during_inference_is_observed(caplog):
             r.getMessage().startswith("result_send_failed") for r in caplog.records
         )
 
-        # No session (and therefore no frame buffer) may survive the teardown.
+        # This scenario's own session — and therefore its frame buffer — must
+        # not survive: once the inference finishes, `evict_expired()` reaps it
+        # as a terminal state. Scoped to `sid` rather than a global count,
+        # because other test modules legitimately leave never-connected
+        # `created` shells behind (they are TTL-managed, frame-free).
         deadline = time.time() + 10
-        while time.time() < deadline and main.SESSIONS.active_count() > 0:
+        while time.time() < deadline:
             main.SESSIONS.evict_expired()
+            if sid not in main.SESSIONS._sessions:
+                break
             time.sleep(0.1)
-        assert main.SESSIONS.active_count() == 0, "session/frame buffers leaked"
+        assert sid not in main.SESSIONS._sessions, "scenario session/frame buffer leaked"
 
 
 # ---------------------------------------------------------------------------
@@ -513,6 +542,15 @@ def test_reproduction_peer_that_never_answers_pings_is_killed_with_1011(caplog):
 
         closed, events, pings_seen, elapsed = asyncio.run(scenario())
 
+        # Server-side, the production log sequence must become visible while
+        # uvicorn is still running: the scenario ends at the kill (~40 s) but
+        # the 46 s stub needs ~6 more seconds. Waiting after the with-block
+        # would race shutdown — asyncio.run inside Server.run cancels the
+        # inference task and `inference_completed` is never logged.
+        completed = _wait_for_log("inference_completed", caplog, timeout=40)
+        send_failed = _wait_for_log("result_send_failed", caplog, timeout=20)
+        finalized = _wait_for_log("session_finalized", caplog, timeout=20)
+
     assert closed is not None, (
         "expected the server to kill the silent peer with a close frame; "
         f"events={[e.get('message', {}).get('type', e['type']) for e in events]}"
@@ -528,12 +566,8 @@ def test_reproduction_peer_that_never_answers_pings_is_killed_with_1011(caplog):
           f"at {closed['at']:.1f}s after accept, {pings_seen} unanswered ping(s), "
           f"elapsed={elapsed:.1f}s")
 
-    # Server-side, the production log sequence must now be visible.
-    completed = _wait_for_log("inference_completed", caplog, timeout=40)
-    assert "prediction=spoof" in completed
-    failed = _wait_for_log("result_send_failed", caplog, timeout=20)
-    assert "stage=after_inference" in failed, failed
-    finalized = _wait_for_log("session_finalized", caplog, timeout=20)
+    assert "prediction=spoof" in completed, completed
+    assert "stage=after_inference" in send_failed, send_failed
     assert "delivered=False" in finalized, finalized
 
 
@@ -586,6 +620,7 @@ def test_pinned_ping_timeout_keeps_a_silent_peer_alive_through_the_inference(cap
                 await peer.aclose()
 
         result, closed, progress, pings_seen, elapsed = asyncio.run(scenario())
+        delivered_log = _wait_for_log("result_send_succeeded", caplog, timeout=10)
 
     assert closed is None, f"connection still died: {closed}"
     assert result is not None, "no result on the connection that survived"
@@ -596,8 +631,7 @@ def test_pinned_ping_timeout_keeps_a_silent_peer_alive_through_the_inference(cap
     print(f"[5] survived: result after {elapsed:.1f}s with {progress} keepalives "
           f"and {pings_seen} unanswered ping(s)")
 
-    messages = [r.getMessage() for r in caplog.records]
-    assert any(m.startswith("result_send_succeeded") for m in messages)
+    assert delivered_log.startswith("result_send_succeeded")
 
 
 # ---------------------------------------------------------------------------
@@ -605,8 +639,22 @@ def test_pinned_ping_timeout_keeps_a_silent_peer_alive_through_the_inference(cap
 # ---------------------------------------------------------------------------
 def test_no_sessions_or_frame_buffers_survive_the_module():
     from app import main
+    from app.sessions import SessionState
 
+    # `evict_expired()` reaps every terminal session (completed/failed/
+    # cancelled/expired), so what may remain afterwards is only:
+    #   * `created` shells whose WebSocket never opened — other test modules
+    #     POST /sessions without always connecting; the app keeps those
+    #     frame-free until their TTL exactly as in production, and
+    # nothing else. Any `streaming`/`inferring` leftover would mean a
+    # scenario was torn down with its frame buffer still held — a real leak.
     main.SESSIONS.evict_expired()
-    assert main.SESSIONS.active_count() == 0, "sessions leaked across scenarios"
-    for session in main.SESSIONS._sessions.values():  # defensive: table is empty
-        assert session.frames == {}, "frame buffers leaked"
+    leftovers = list(main.SESSIONS._sessions.values())
+    with_frames = [s.session_id[:8] for s in leftovers if s.frames]
+    assert not with_frames, f"frame buffers leaked: {with_frames}"
+    stuck = [
+        (s.session_id[:8], s.state.value)
+        for s in leftovers
+        if s.state is not SessionState.CREATED
+    ]
+    assert not stuck, f"sessions stuck mid-lifecycle: {stuck}"

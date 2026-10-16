@@ -151,17 +151,41 @@ proxy, keep its idle timeout above 60 s as well. Note that a proxy timeout
 would appear as `ws_client_gone … inference_running=True` in the server log,
 not as a server-side error.
 
-### `Origin ... not allowed` (CORS)
+### `Service offline` / `Could not reach the liveness service` (CORS)
 
-The API's CORS middleware only permits origins in
-`LIVENESS_ALLOWED_ORIGINS` (comma-separated). Set it to your exact Vercel
-origin, no trailing slash:
+Both messages come from `fetch` **rejecting** — before any inference runs —
+which is what the browser does when a cross-origin response carries no
+`Access-Control-Allow-Origin` header. The API can be perfectly healthy while
+this happens.
+
+The API's CORS middleware only permits origins in `LIVENESS_ALLOWED_ORIGINS`
+(comma-separated, each an exact `scheme://host` origin with **no trailing
+slash**, no path). Diagnose from any machine:
+
+```bash
+# Healthy API but ACAO header missing for your origin => origin not allow-listed:
+curl -i -H "Origin: https://YOUR-FRONTEND.vercel.app" https://YOUR-API.onrender.com/health
+
+# Preflight answer tells you the same thing in words:
+curl -i -X OPTIONS https://YOUR-API.onrender.com/sessions \
+  -H "Origin: https://YOUR-FRONTEND.vercel.app" \
+  -H "Access-Control-Request-Method: POST"
+#   allow-listed  -> 200 + access-control-allow-origin: <origin>
+#   NOT allow-listed -> 400 "Disallowed CORS origin" (Starlette)
+```
+
+Fix: set `LIVENESS_ALLOWED_ORIGINS` in the Render dashboard **and** in
+`render.yaml` (the blueprint syncs its value over manual dashboard edits),
+then redeploy:
 
 ```
-LIVENESS_ALLOWED_ORIGINS=https://your-demo-app.vercel.app
+LIVENESS_ALLOWED_ORIGINS=https://face-liveness-platform.vercel.app,https://face-liveness-platform-5iupvthd2.vercel.app
 ```
 
-Remember to **restart/re-deploy** — it's read at startup.
+It is read at startup — a redeploy is required. Also verify the Vercel
+build-time variable `VITE_LIVENESS_API_URL` (baked into the bundle at build,
+so changing it requires a **redeploy of the frontend**): confirm with
+`curl -s https://YOUR-FRONTEND.vercel.app/assets/index-*.js | grep onrender`.
 
 ### Client gets `duplicate_frame` / `bad_index`
 

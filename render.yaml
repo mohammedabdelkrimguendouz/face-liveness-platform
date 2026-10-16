@@ -66,11 +66,26 @@ services:
       # Leave as-is unless you relocate the weights.
       - key: LIVENESS_MODELS_DIR
         value: models
-      # Set to your deployed demo origin once the Vercel app exists
-      # (comma-separated for more than one). Until then the placeholder only
-      # blocks cross-origin browser calls; same-origin and server-side calls
-      # are unaffected.
+      # Exact browser origins allowed to call the API cross-origin.
+      # Comma-separated (see app/config.py `_csv`: split on ",", items stripped).
+      # This is an ORIGIN only — scheme + host, no path, no trailing slash.
+      #
+      # These two values are the deployed LIVENOX frontends:
+      #   https://face-liveness-platform.vercel.app          (public, serves the app)
+      #   https://face-liveness-platform-5iupvthd2.vercel.app (second deployment)
+      #
+      # Evidence for why this must be exact: with the previous placeholder
+      # value the deployed API answered GET /health from either origin with
+      # NO `Access-Control-Allow-Origin` header and answered the preflight
+      # for POST /sessions with HTTP 400 "Disallowed CORS origin" (Starlette's
+      # CORSMiddleware rejection). The browser therefore failed the health
+      # fetch (UI: "Service offline") and the session-creation fetch (UI:
+      # "Could not reach the liveness service") even though the API was
+      # healthy (GET /ready -> ready:true). See docs/TROUBLESHOOTING.md.
+      #
+      # Keep this value in sync with the Render dashboard environment: a
+      # blueprint sync overwrites manual dashboard edits with this file.
       - key: LIVENESS_ALLOWED_ORIGINS
-        value: https://your-demo-app.vercel.app
+        value: https://face-liveness-platform.vercel.app,https://face-liveness-platform-5iupvthd2.vercel.app
       - key: LOG_LEVEL
         value: info

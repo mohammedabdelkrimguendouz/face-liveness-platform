@@ -59,14 +59,13 @@ Set in `render.yaml` (no dashboard work needed):
 | `LIVENESS_DEVICE` | `cpu` | Render has no GPU. |
 | `LIVENESS_BATCH_SIZE` | `8` | Feature-extraction batch. Lower = less RAM. |
 | `LIVENESS_MODELS_DIR` | `models` | Checkpoint dir, relative to `services/face-liveness-api/`. |
-| `LIVENESS_ALLOWED_ORIGINS` | placeholder | **Replace** with your Vercel URL (see below). |
-| `LOG_LEVEL` | `info` | Uvicorn/log level. |
+| `LIVENESS_ALLOWED_ORIGINS` | `https://face-liveness-platform.vercel.app,https://face-liveness-platform-5iupvthd2.vercel.app` | Exact browser origins allowed to call the API (comma-separated, no trailing slash). |
 
-**You must set manually:**
+**Keep in sync manually if you add origins:**
 
 | Variable | When | Notes |
 |----------|------|-------|
-| `LIVENESS_ALLOWED_ORIGINS` | After the demo is deployed | Comma-separated. Until you replace the placeholder, cross-origin browser calls from the demo are blocked (server-side and same-origin calls are unaffected). |
+| `LIVENESS_ALLOWED_ORIGINS` | Whenever the frontend (or a preview domain) changes | Comma-separated exact origins (`scheme://host`, no path). A blueprint deploy syncs this file's value **over** any manual dashboard edit, so change `render.yaml` too. If it does not list the origin the browser sends, `GET /health` omits `Access-Control-Allow-Origin` and the preflight answers `400 Disallowed CORS origin` — the UI then shows "Service offline" / "Could not reach the liveness service" even though the API is healthy. |
 
 **Optional** (defaults apply if unset): `LIVENESS_NUM_FRAMES` (150 — don't
 change, it must match the checkpoint), `LIVENESS_SESSION_TTL` (300),

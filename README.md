@@ -1,6 +1,6 @@
 # Face Liveness Platform
 
-Production platform for **passive face liveness detection** (anti-spoofing),
+Platform for **passive face liveness detection** (anti-spoofing),
 built on the existing research pipeline. The client captures a short RGB camera
 sequence and streams it to a backend that runs the trained model and returns
 the authoritative **live / spoof** verdict.
@@ -155,8 +155,9 @@ cd apps/demo-web && npm run typecheck && npm run build
 
 ## Deployment
 
-Deployment configs and exact commands are prepared; **you run the deploys**
-(no credentials are stored here).
+Deployment configs and exact commands for (re)deploying each component;
+no credentials are stored here. The current verified status of each
+component is listed under [Honest limitations](#honest-limitations) below.
 
 | Target | Config | Guide |
 |--------|--------|-------|
@@ -207,11 +208,27 @@ All via environment variables (see `app/config.py`):
    (excluding upload).
 4. **Camera capture is untested in CI** — it needs a physical webcam and user
    permission. The WS + model path *is* covered by the real-model tests.
-5. **Not deployed / not published.** Render, Vercel, and npm steps are
-   prepared and documented but intentionally left to you.
+5. **Deployment status.** The demo frontend is deployed on Vercel at
+   <https://face-liveness-platform.vercel.app>. The API is deployed on
+   Render at <https://face-liveness-api-892k.onrender.com> — `/health`,
+   `/ready`, `POST /sessions`, and the WebSocket handshake were verified
+   responding; browsers are only served cross-origin when their origin is
+   listed in `LIVENESS_ALLOWED_ORIGINS` (see
+   [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)). The SDK is
+   published to npm as
+   [`@mohammedabdelkrimguendouz/face-liveness-sdk`](https://www.npmjs.com/package/@mohammedabdelkrimguendouz/face-liveness-sdk)
+   (latest `0.1.1`).
 
 See [`docs/IMPLEMENTATION_REPORT.md`](docs/IMPLEMENTATION_REPORT.md) for
 measured numbers and the full verification record.
+
+---
+
+## Team Contributions
+
+**Mohammed Abdelkrim Guendouz — Project Developer**
+
+Responsible for developing the LIVENOX platform, integrating the face liveness model with the backend API, implementing the TypeScript SDK and React demo integration, and preparing the project documentation and deployment.
 
 ---
 
