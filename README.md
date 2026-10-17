@@ -32,16 +32,20 @@ face-liveness-platform/
 
 ## How it works
 
-1. **Session** — client `POST /sessions` → gets `session_id`, `ws_token`,
+1. **Face gate** (on-device) — every frame is checked with MediaPipe Face
+   Detector *before* upload; frames without a face are never sent, and a
+   sustained absence aborts with a `no-face` error so the user can retry.
+2. **Session** — client `POST /sessions` → gets `session_id`, `ws_token`,
    `num_frames` (150).
-2. **Stream** — client opens `WS /ws/sessions/{id}?token=…` and sends 150
-   frames: `4-byte big-endian sequence index` + `JPEG payload`.
-3. **Assemble** — server stores frames by index (order-independent), rejects
+3. **Stream** — client opens `WS /ws/sessions/{id}?token=…` and sends 150
+   frames captured at **10 fps (~15 s)**:
+   `4-byte big-endian sequence index` + `JPEG payload`.
+4. **Assemble** — server stores frames by index (order-independent), rejects
    duplicates/oversized/out-of-range, and auto-finalizes when all arrive.
-4. **Infer** — EfficientNet-B2 extracts 1408-d features per frame → a BiLSTM
+5. **Infer** — EfficientNet-B2 extracts 1408-d features per frame → a BiLSTM
    undercomplete autoencoder reconstructs the sequence →
    `anomaly_score = 1 − exp(−MSE)`.
-5. **Decide** — `score > 0.5` ⇒ `spoof`, else `live`. Returned as `result`.
+6. **Decide** — `score > 0.5` ⇒ `spoof`, else `live`. Returned as `result`.
 
 Frames are then released; the score is an **anomaly score, not a
 probability**.
@@ -142,10 +146,10 @@ console.log(result.prediction); // "live" | "spoof"
 ## Tests
 
 ```bash
-# API — 21 tests (protocol mocked + 2 real-model integration tests)
+# API — 71 tests (mocked protocol + 2 real-model integration tests)
 cd services/face-liveness-api && .venv/Scripts/python -m pytest -v
 
-# SDK — 7 tests (mocked camera/WebSocket)
+# SDK — 21 tests (mocked camera/WebSocket/face detector)
 cd packages/face-liveness-sdk && npm test
 
 # Demo — typecheck + production build
@@ -218,7 +222,7 @@ All via environment variables (see `app/config.py`):
    [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)). The SDK is
    published to npm as
    [`@mohammedabdelkrimguendouz/face-liveness-sdk`](https://www.npmjs.com/package/@mohammedabdelkrimguendouz/face-liveness-sdk)
-   (latest `0.1.1`).
+   (latest `0.1.2`).
 
 See [`docs/IMPLEMENTATION_REPORT.md`](docs/IMPLEMENTATION_REPORT.md) for
 measured numbers and the full verification record.

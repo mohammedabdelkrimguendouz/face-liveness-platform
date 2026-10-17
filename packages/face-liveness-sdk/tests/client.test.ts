@@ -1,6 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LivenessClient } from "../src/client";
 import { LivenessError, isLivenessError } from "../src/errors";
+import { loadFaceDetector } from "../src/face-detector";
+
+// The face gate normally loads MediaPipe's WASM runtime + model from a CDN;
+// unit tests must never touch the network, so the loader is mocked. What the
+// fake detector "sees" in each frame is driven by faceGate.present.
+const faceGate = vi.hoisted(() => ({ present: true, detectCalls: 0 }));
+vi.mock("../src/face-detector", () => ({
+  loadFaceDetector: vi.fn(async () => ({
+    detect: () => {
+      faceGate.detectCalls += 1;
+      return {
+        detections: faceGate.present ? [{ categories: [{ score: 0.99 }] }] : [],
+      };
+    },
+  })),
+}));
 
 // ---------------------------------------------------------------------------
 // Browser API mocks
@@ -127,6 +143,8 @@ async function waitFor(cond: () => boolean, timeout = 2000): Promise<void> {
 }
 
 beforeEach(() => {
+  faceGate.present = true;
+  faceGate.detectCalls = 0;
   installMocks();
   // jsdom's Blob does not implement arrayBuffer(); real browsers do.
   if (typeof Blob.prototype.arrayBuffer !== "function") {
@@ -526,6 +544,121 @@ describe("LivenessClient — timeout and connection diagnostics", () => {
     ws._msg(RESULT_MSG);
     const result = await promise;
     expect(result.prediction).toBe("live");
+  });
+});
+
+describe("LivenessClient — on-device face gate", () => {
+  it("aborts with no-face and uploads nothing when no face is ever present", async () => {
+    faceGate.present = false;
+    const onError = vi.fn();
+    const client = new LivenessClient(
+      { apiUrl: "http://localhost:8000", targetFps: 200 },
+      { onError },
+    );
+    const promise = client.start();
+    // Attach the assertion before the loop can settle the promise.
+    const assertion = expect(promise).rejects.toMatchObject({
+      code: "no-face",
+      message: expect.stringContaining("Face not detected"),
+    });
+
+    await waitFor(() => MockWebSocket.instances.length > 0);
+    const ws = MockWebSocket.instances[0];
+    ws._open();
+    ws._msg({ type: "ready", required_frames: REQUIRED });
+
+    await assertion;
+    // Not a single faceless frame may reach the backend.
+    expect(binaryFrames(ws).length).toBe(0);
+    expect(onError).toHaveBeenCalled();
+    expect(client.getPhase()).toBe("failed");
+  });
+
+  it("tolerates brief misses and completes once the face returns", async () => {
+    faceGate.present = false;
+    const client = new LivenessClient({
+      apiUrl: "http://localhost:8000",
+      targetFps: 200,
+    });
+    const promise = client.start();
+
+    await waitFor(() => MockWebSocket.instances.length > 0);
+    const ws = MockWebSocket.instances[0];
+    ws._open();
+    ws._msg({ type: "ready", required_frames: REQUIRED });
+
+    // A few misses (under the default tolerance of 10)...
+    await waitFor(() => faceGate.detectCalls >= 3);
+    // ...then the face returns: capture proceeds normally.
+    faceGate.present = true;
+    await waitFor(() => binaryFrames(ws).length === REQUIRED, 5000);
+
+    ws._msg({ type: "processing", received: REQUIRED });
+    ws._msg({
+      type: "result",
+      session_id: "sess123",
+      prediction: "live",
+      anomaly_score: 0.04,
+      reconstruction_error: 0.041,
+      threshold: 0.5,
+      frames_processed: REQUIRED,
+      inference_ms: 900,
+    });
+    const result = await promise;
+    expect(result.prediction).toBe("live");
+  });
+
+  it("fails on the first miss when maxConsecutiveMisses is 0", async () => {
+    faceGate.present = false;
+    const client = new LivenessClient({
+      apiUrl: "http://localhost:8000",
+      targetFps: 200,
+      faceDetection: { maxConsecutiveMisses: 0 },
+    });
+    const promise = client.start();
+    const assertion = expect(promise).rejects.toMatchObject({ code: "no-face" });
+
+    await waitFor(() => MockWebSocket.instances.length > 0);
+    const ws = MockWebSocket.instances[0];
+    ws._open();
+    ws._msg({ type: "ready", required_frames: REQUIRED });
+
+    await assertion;
+    expect(binaryFrames(ws).length).toBe(0);
+  });
+
+  it("never loads the detector when faceDetection is disabled", async () => {
+    const client = new LivenessClient({
+      apiUrl: "http://localhost:8000",
+      targetFps: 200,
+      faceDetection: false,
+    });
+    const promise = client.start();
+
+    await waitFor(() => MockWebSocket.instances.length > 0);
+    const ws = MockWebSocket.instances[0];
+    ws._open();
+    ws._msg({ type: "ready", required_frames: REQUIRED });
+    await waitFor(() => binaryFrames(ws).length > 0);
+
+    expect(vi.mocked(loadFaceDetector)).not.toHaveBeenCalled();
+    expect(faceGate.detectCalls).toBe(0);
+
+    client.cancel();
+    await expect(promise).rejects.toMatchObject({ code: "cancelled" });
+  });
+
+  it("propagates a detector load failure as face-detect-failed", async () => {
+    vi.mocked(loadFaceDetector).mockRejectedValueOnce(
+      new LivenessError("face-detect-failed", "WASM failed to load."),
+    );
+    const client = new LivenessClient({ apiUrl: "http://localhost:8000" });
+    await expect(client.start()).rejects.toMatchObject({
+      code: "face-detect-failed",
+    });
+    // The gate failed closed: no session was ever opened, so no frames could
+    // possibly have been uploaded.
+    expect(MockWebSocket.instances.length).toBe(0);
   });
 });
 

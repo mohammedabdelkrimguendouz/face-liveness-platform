@@ -1,6 +1,8 @@
 import { assertBrowserSupported, openCamera, type CameraHandle } from "./camera";
 import { LivenessError } from "./errors";
+import { loadFaceDetector, type FaceDetectorLike } from "./face-detector";
 import type {
+  FaceDetectionOptions,
   LivenessCallbacks,
   LivenessOptions,
   LivenessPhase,
@@ -13,6 +15,12 @@ const SEQ_HEADER_SIZE = 4;
 
 /** Fallback frame count if the server does not specify one. */
 const FALLBACK_REQUIRED_FRAMES = 150;
+
+/**
+ * Sentinel returned by captureFrame() when the drawn frame contains no face;
+ * such frames are never uploaded (see the face gate in beginCaptureLoop()).
+ */
+const NO_FACE = Symbol("no-face");
 
 interface SessionInfo {
   sessionId: string;
@@ -58,12 +66,23 @@ export class LivenessClient {
   private pendingReject: ((e: LivenessError) => void) | null = null;
   private readonly encoder: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D | null;
+  /** Face gate: loaded once per run; null when faceDetection is disabled. */
+  private detector: FaceDetectorLike | null = null;
+  /** Whether the on-device face gate is active for this run. */
+  private readonly faceGateEnabled: boolean;
+  private readonly faceGateOpts: FaceDetectionOptions;
+  /** Consecutive frames seen without a face (reset when a face returns). */
+  private faceMisses = 0;
 
   constructor(options: LivenessOptions, callbacks: LivenessCallbacks = {}) {
+    this.faceGateEnabled = options.faceDetection !== false;
+    this.faceGateOpts =
+      typeof options.faceDetection === "object" ? options.faceDetection : {};
+    this.faceMisses = 0;
     this.opts = {
       apiUrl: options.apiUrl,
       width: options.width ?? 720,
-      targetFps: options.targetFps ?? 20,
+      targetFps: options.targetFps ?? 10,
       jpegQuality: options.jpegQuality ?? 85,
       timeoutMs: options.timeoutMs ?? 120_000,
       deviceId: options.deviceId,
@@ -162,9 +181,12 @@ export class LivenessClient {
     this.cb.onStream?.(this.camera.stream);
     this.throwIfCancelled();
 
-    // 2. Session
+    // 2. Session + face detector (parallel: two independent network loads).
     this.setPhase("connecting");
-    const session = await this.createSession();
+    const [session] = await Promise.all([
+      this.createSession(),
+      this.loadFaceGate(),
+    ]);
     this.required = session.numFrames;
 
     // 3. Capture + stream
@@ -174,6 +196,16 @@ export class LivenessClient {
     // Phase completion + onSuccess are emitted by start(), which owns the
     // race against cancel/timeout, so we simply return the result here.
     return result;
+  }
+
+  /**
+   * Load the on-device face detector for this run. No-op when the host
+   * disabled the gate; a load failure rejects with `face-detect-failed` so a
+   * broken gate can never silently let un-gated frames through.
+   */
+  private async loadFaceGate(): Promise<void> {
+    if (!this.faceGateEnabled) return;
+    this.detector = await loadFaceDetector(this.faceGateOpts);
   }
 
   private async createSession(): Promise<SessionInfo> {
@@ -346,9 +378,21 @@ export class LivenessClient {
         }
 
         const started = performance.now();
-        const payload = await this.captureFrame(session.maxFrameBytes);
-        if (payload) {
-          this.sendFrame(this.captured, payload);
+        const frame = await this.captureFrame(session.maxFrameBytes);
+        if (frame === NO_FACE) {
+          // Face gate miss: skip the frame (never uploaded) and count it.
+          this.faceMisses += 1;
+          this.emit("capturing", "Looking for your face… please face the camera.");
+          const maxMisses = this.faceGateOpts.maxConsecutiveMisses ?? 10;
+          if (this.faceMisses > maxMisses) {
+            throw new LivenessError(
+              "no-face",
+              "Face not detected. Please try again."
+            );
+          }
+        } else if (frame) {
+          this.faceMisses = 0;
+          this.sendFrame(this.captured, frame);
           this.captured += 1;
           if (this.captured % 10 === 0 || this.captured === this.required) {
             this.emit("capturing", `Captured ${this.captured} of ${this.required} frames…`);
@@ -389,9 +433,12 @@ export class LivenessClient {
 
   /**
    * Draw the current video frame to the offscreen canvas and encode as JPEG.
-   * Returns null (and lets the loop retry) if the frame is not ready.
+   * Returns {@link NO_FACE} when the face gate rejects the frame (it is then
+   * never uploaded), null if the frame is not ready (the loop retries).
    */
-  private async captureFrame(maxBytes: number): Promise<ArrayBuffer | null> {
+  private async captureFrame(
+    maxBytes: number,
+  ): Promise<ArrayBuffer | null | typeof NO_FACE> {
     const video = this.camera?.video;
     if (!video || video.readyState < 2 || !this.ctx) return null;
     const w = video.videoWidth;
@@ -402,6 +449,15 @@ export class LivenessClient {
       this.encoder.height = h;
     }
     this.ctx.drawImage(video, 0, 0, w, h);
+
+    // Face gate: run MediaPipe Face Detector on exactly the pixels we would
+    // upload; a frame without a face is rejected before it is encoded.
+    if (
+      this.detector &&
+      this.detector.detect(this.encoder).detections.length === 0
+    ) {
+      return NO_FACE;
+    }
 
     const blob = await new Promise<Blob | null>((resolve) =>
       this.encoder.toBlob((b) => resolve(b), "image/jpeg", this.opts.jpegQuality / 100)

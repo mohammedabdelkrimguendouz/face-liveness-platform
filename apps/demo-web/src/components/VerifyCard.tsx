@@ -1,6 +1,7 @@
 import * as React from "react";
 import {
   useLiveness,
+  isLivenessError,
   type LivenessResult,
   type LivenessPhase,
 } from "@mohammedabdelkrimguendouz/face-liveness-sdk/react";
@@ -89,7 +90,7 @@ export function VerifyCard(): React.ReactElement {
     isRunning,
     start,
     cancel,
-  } = useLiveness({ apiUrl: API_URL, targetFps: 20, jpegQuality: 85 });
+  } = useLiveness({ apiUrl: API_URL, targetFps: 10, jpegQuality: 85 });
 
   const [stream, setStream] = React.useState<MediaStream | null>(null);
 
@@ -198,7 +199,11 @@ export function VerifyCard(): React.ReactElement {
             <div className="alert alert--error" role="alert">
               <ExclamationIcon className="alert__icon" />
               <div>
-                <strong>Verification failed.</strong>
+                <strong>
+                  {isLivenessError(error) && error.code === "no-face"
+                    ? "Face not detected."
+                    : "Verification failed."}
+                </strong>
                 <div>{error.message}</div>
               </div>
             </div>

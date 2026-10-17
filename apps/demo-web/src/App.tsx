@@ -65,8 +65,8 @@ export default function App(): React.ReactElement {
             <p className="eyebrow">Passive liveness detection</p>
             <h1>Confirm a real person is in front of the camera.</h1>
             <p className="lede">
-              Look at the camera for a few seconds — no passwords, no action
-              prompts.
+              Keep your face in view for about 15 seconds — no passwords, no
+              action prompts.
             </p>
           </div>
 

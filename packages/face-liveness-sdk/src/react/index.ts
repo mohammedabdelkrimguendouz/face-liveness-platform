@@ -13,4 +13,10 @@ export type {
   LivenessProgress,
   LivenessOptions,
   LivenessCallbacks,
+  FaceDetectionOptions,
 } from "../types";
+
+// Runtime helpers come from the same modules the hook throws from, so
+// `error instanceof LivenessError` / `isLivenessError(error)` hold when the
+// consumer imports everything from the /react entry.
+export { LivenessError, isLivenessError } from "../errors";

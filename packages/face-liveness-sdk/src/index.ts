@@ -8,4 +8,5 @@ export type {
   LivenessProgress,
   LivenessOptions,
   LivenessCallbacks,
+  FaceDetectionOptions,
 } from "./types";

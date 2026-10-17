@@ -49,6 +49,8 @@ export type LivenessErrorCode =
   | "timeout"              // operation exceeded its deadline
   | "cancelled"            // caller aborted
   | "capture-failed"       // frame capture error
+  | "no-face"              // face gate: no face found in the frames
+  | "face-detect-failed"   // face detector failed to load / initialize
   | "server-error"         // backend returned a protocol/processing error
   | "invalid-config";      // bad options supplied to the SDK
 
@@ -70,7 +72,7 @@ export interface LivenessOptions {
   apiUrl: string;
   /** Preferred capture resolution width (height is derived). Default 720. */
   width?: number;
-  /** Target capture frames-per-second. Default 20. */
+  /** Target capture frames-per-second. Default 10 (150 frames ≈ 15 s). */
   targetFps?: number;
   /** JPEG quality (1-100) for uploaded frames. Default 85. */
   jpegQuality?: number;
@@ -80,6 +82,35 @@ export interface LivenessOptions {
   deviceId?: string;
   /** Abort signal for external cancellation. */
   signal?: AbortSignal;
+  /**
+   * On-device face gate: every frame is checked with MediaPipe Face Detector
+   * before it is uploaded, and frames without a face are never sent. A
+   * sustained absence aborts the verification with a `no-face` error so the
+   * user can try again. Pass `false` to disable. Default: enabled.
+   */
+  faceDetection?: FaceDetectionOptions | false;
+}
+
+/** Options for the on-device MediaPipe face gate. */
+export interface FaceDetectionOptions {
+  /** Minimum detection score [0..1] to count as a face. Default 0.5. */
+  minScore?: number;
+  /**
+   * Consecutive frames without a face tolerated before aborting with a
+   * `no-face` error. Default 10 (≈1 s at 10 fps); `0` fails on the first miss.
+   * Brief misses (motion blur, a fast head turn) do not restart the run.
+   */
+  maxConsecutiveMisses?: number;
+  /**
+   * Base URL of the tasks-vision WASM assets. Defaults to the pinned
+   * jsDelivr CDN path; point it at your own copy for offline delivery.
+   */
+  wasmPath?: string;
+  /**
+   * URL of the MediaPipe FaceDetector model file. Defaults to Google's hosted
+   * blaze_face_short_range (~225 KB); point it at your own copy to self-host.
+   */
+  modelUrl?: string;
 }
 
 /** Callbacks accepted by {@link LivenessClient.start}. */

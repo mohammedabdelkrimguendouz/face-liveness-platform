@@ -1,6 +1,6 @@
 {
   "name": "@mohammedabdelkrimguendouz/face-liveness-sdk",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Browser SDK for passive face liveness verification. Captures a facial frame sequence and streams it to a liveness backend over WebSocket.",
   "license": "MIT",
   "type": "module",
@@ -66,5 +66,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "^1.1.1"
   }
 }
