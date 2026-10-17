@@ -84,9 +84,9 @@ FastAPI (face-liveness-api)
 
 | Item | Handling |
 |------|----------|
-| `feature_extractor.py` | Copied **verbatim** from `test_models/models/` |
-| `lstm_models.py` | Copied **verbatim** |
-| `model_loader.py` | Copied **verbatim** |
+| `feature_extractor.py` | Copied **verbatim** from `test_models/models/` (unused video-file helpers removed in cleanup) |
+| `lstm_models.py` | **Removed in cleanup** — unused research classes (`LSTMAutoencoder`, `BiLSTMVariationalAutoencoder`); neither matches the shipped checkpoint |
+| `model_loader.py` | **Removed in cleanup** — unused research loader for the classes above |
 | `bi_lstm_undercomplete.py` | **New** — reconstruction of the class matching the shipped checkpoint |
 | `checkpoint_loader.py` | **New** — `strict=True` load, strips `module.` prefix |
 | `pipeline.py` | **New** — HTTP-independent orchestration preserving exact preprocessing |

@@ -64,11 +64,12 @@ preprocessing changes**:
 | Score | `1 − exp(−MSE)` | `run_test.py` |
 | Normalization | ImageNet mean/std, `/255`, NCHW, BGR→RGB | `feature_extractor.py` |
 
-`app/ml/feature_extractor.py`, `lstm_models.py`, and `model_loader.py` are
-copied **verbatim** from the research project. `bi_lstm_undercomplete.py`
-reconstructs the one model class that matches the shipped checkpoint
-(`ABC_BiLSTM_Undercomplete_AE.pt`) — verified with a `strict=True` state-dict
-load (0 missing / 0 unexpected keys).
+`app/ml/feature_extractor.py` (the EfficientNet-B2 extractor) is copied
+**verbatim** from the research project; its unused video-file helpers were
+removed in a cleanup. `bi_lstm_undercomplete.py` provides the single model
+class used by the platform — it reconstructs the architecture that matches
+the shipped checkpoint (`ABC_BiLSTM_Undercomplete_AE.pt`) — verified with a
+`strict=True` state-dict load (0 missing / 0 unexpected keys).
 
 Verified decisions on the bundled Oulu samples:
 

@@ -1,9 +1,12 @@
 """ML layer for the face liveness API.
 
-``feature_extractor`` / ``lstm_models`` / ``model_loader`` are copied verbatim
-from the original research project. ``bi_lstm_undercomplete`` and
-``checkpoint_loader`` reconstruct the model class required by the single
-shipped checkpoint. ``pipeline`` is the HTTP-independent inference entrypoint.
+``feature_extractor`` retains the original research project's EfficientNet-B2
+feature extractor (verbatim). ``bi_lstm_undercomplete`` provides the single
+model class used by this project — the architecture that matches the shipped
+checkpoint — and ``checkpoint_loader`` loads it with ``strict=True``.
+``pipeline`` is the HTTP-independent inference entrypoint. The unused research
+model classes (``LSTMAutoencoder``, ``BiLSTMVariationalAutoencoder``) and their
+loader were removed; neither matches the shipped checkpoint.
 """
 
 from .pipeline import LivenessPipeline, LivenessResult, PipelineConfig  # noqa: F401

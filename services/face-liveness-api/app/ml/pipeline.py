@@ -17,8 +17,8 @@ Preprocessing is preserved *exactly* from the original training/eval code
     * layout         : NCHW
     * backbone norm  : ImageNet mean/std applied inside the extractor
     * sampling       : uniform to exactly NUM_FRAMES (150); if fewer frames are
-                       supplied, repeat the last frame (same as
-                       ``uniform_sampling``'s padding branch)
+                       supplied, repeat the last frame (same as the research
+                       project's ``uniform_sampling`` padding branch)
     * score          : ``1 - exp(-MSE)`` compared against the checkpoint threshold
 """
 
@@ -116,8 +116,9 @@ class LivenessPipeline:
     def decode_frames(self, encoded_frames: List[bytes]) -> Optional[torch.Tensor]:
         """Decode encoded (JPEG/PNG) frames into the model's NCHW float tensor.
 
-        Returns None if no frame could be decoded. Mirrors ``read_video_frames``
-        preprocessing but takes the frames from memory instead of a file.
+        Returns None if no frame could be decoded. Mirrors the research
+        project's ``read_video_frames`` preprocessing but takes the frames from
+        memory instead of a file.
         """
         frames: List[np.ndarray] = []
         for buf in encoded_frames:
