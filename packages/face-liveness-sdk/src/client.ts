@@ -359,6 +359,14 @@ export class LivenessClient {
         if (wait > 0) await sleep(wait);
       }
 
+      // Every frame has been sent — release the camera NOW instead of keeping
+      // it open (webcam LED on) for the whole server-side inference window,
+      // which can take tens of seconds. The result arrives over the WebSocket
+      // and needs no video. `teardown()` stops it again only if a failure or
+      // cancel got here before capture finished (stop() is idempotent).
+      this.camera?.stop();
+      this.camera = null;
+
       // Signal completion; server responds with `processing` then `result`.
       this.emit("transmitting", "Finalizing upload…");
       this.ws?.send(JSON.stringify({ type: "complete" }));
